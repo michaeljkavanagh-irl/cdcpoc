@@ -1,0 +1,29 @@
+{
+  "name": "postgres-source-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "host.docker.internal",
+    "database.port": "${env:POSTGRES_PORT}",
+    "database.user": "${env:POSTGRES_USER}",
+    "database.password": "${env:POSTGRES_PASSWORD}",
+    "database.dbname": "${env:POSTGRES_DB}",
+    "database.server.name": "dev.opusccc",
+    "table.include.list": "public.*",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "filtered",
+    "slot.name": "debezium_northwind_slot",
+    "topic.prefix": "northwind-source",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "snapshot.mode": "initial",
+    "time.precision.mode": "connect",
+    "decimal.handling.mode": "double",
+    "transforms": "routeRows",
+    "transforms.routeRows.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.routeRows.regex": ".*",
+    "transforms.routeRows.replacement": "dev.opusccc.kafka.sample-topic-dev"
+  }
+}

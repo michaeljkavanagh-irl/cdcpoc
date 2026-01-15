@@ -1,0 +1,19 @@
+# Environment files
+.env
+
+# Maven
+custom-smt/target/
+custom-smt/dependency-reduced-pom.xml
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Docker volumes
+postgres-data/
