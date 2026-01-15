@@ -1,5 +1,5 @@
 {
-  "name": "postgres-source-connector",
+  "name": "postgres-source-connector-v2",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
@@ -12,7 +12,7 @@
     "table.include.list": "public.*",
     "plugin.name": "pgoutput",
     "publication.autocreate.mode": "filtered",
-    "slot.name": "debezium_northwind_slot",
+    "slot.name": "debezium_northwind_slot_v2",
     "topic.prefix": "northwind-source",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "key.converter.schemas.enable": "false",
@@ -24,6 +24,6 @@
     "transforms": "routeRows",
     "transforms.routeRows.type": "org.apache.kafka.connect.transforms.RegexRouter",
     "transforms.routeRows.regex": ".*",
-    "transforms.routeRows.replacement": "dev.opusccc.kafka.sample-topic-dev"
+    "transforms.routeRows.replacement": "northwind.clean.topic"
   }
 }

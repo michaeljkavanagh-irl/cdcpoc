@@ -1,4 +1,4 @@
-# VanillaFlow - PostgreSQL to MongoDB CDC Pipeline
+# CDCFLOW - PostgreSQL to MongoDB CDC Pipeline
 
 A production-ready Change Data Capture (CDC) pipeline that synchronizes data from PostgreSQL to MongoDB using Kafka, Debezium, and a custom Single Message Transform (SMT) for dynamic collection routing.
 
@@ -16,7 +16,7 @@ MongoDB Atlas (Multiple Collections)
 
 ### Key Features
 
-- **Single Topic Consolidation**: All PostgreSQL tables stream to one Kafka topic (`dev.opusccc.kafka.sample-topic-dev`)
+- **Single Topic Consolidation**: All PostgreSQL tables stream to one Kafka topic (`<consolidated-topic-name>`)
 - **Dynamic Collection Fanout**: Custom SMT routes messages to appropriate MongoDB collections based on source table
 - **Soft Deletes**: DELETE operations preserve data with `__deleted: true` marker
 - **Clean Documents**: Metadata fields removed from final MongoDB documents
@@ -69,7 +69,7 @@ The custom Single Message Transform handles:
 
 ```bash
 git clone <repository-url>
-cd vanillaflow
+cd cdcflow
 ```
 
 ### 2. Set Up Environment Variables
@@ -241,7 +241,7 @@ Key settings:
   "database.dbname": "northwind",
   "slot.name": "debezium_northwind_slot",
   "topic.prefix": "northwind-source",
-  "transforms.routeRows.replacement": "dev.opusccc.kafka.sample-topic-dev"
+  "transforms.routeRows.replacement": "<consolidated-topic-name>"
 }
 ```
 
@@ -340,7 +340,7 @@ sleep 15
 ```bash
 docker exec kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 \
-  --topic dev.opusccc.kafka.sample-topic-dev \
+  --topic <consolidated-topic-name> \
   --from-beginning --max-messages 5
 ```
 
@@ -364,7 +364,7 @@ mongosh ... --eval "
 ## Project Structure
 
 ```
-vanillaflow/
+cdcflow/
 ├── connectors/
 │   ├── postgres-source.json      # Debezium source connector config
 │   └── mongodb-sink.json          # MongoDB sink connector config

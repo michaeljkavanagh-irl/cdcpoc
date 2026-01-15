@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   kafka:
-    image: apache/kafka:4.1.0
+    image: confluentinc/cp-kafka:7.8.0
     hostname: kafka
     container_name: kafka
     ports:
@@ -26,14 +26,6 @@ services:
       KAFKA_JMX_HOSTNAME: localhost
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
       CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-    command:
-      - bash
-      - -c
-      - |
-        # Format storage if not already formatted
-        kafka-storage format -t $${CLUSTER_ID} -c /etc/kafka/docker/server.properties --ignore-formatted
-        # Start Kafka
-        /etc/confluent/docker/run
     networks:
       - kafka-network
     healthcheck:

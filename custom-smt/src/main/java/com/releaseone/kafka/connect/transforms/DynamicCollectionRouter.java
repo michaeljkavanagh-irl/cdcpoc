@@ -13,12 +13,14 @@ import java.util.Map;
  * Custom SMT that:
  * 1. Extracts the table name from Debezium CDC envelope
  * 2. Unwraps the 'after' field to get the actual record data
- * 3. Adds collection name to message headers for routing (works with tombstones)
- * 4. Handles all CRUD operations (insert, update, delete)
+ * 3. Changes the topic name to the table name for collection routing
+ * 4. Handles all CRUD operations including real deletes
+ * 
+ * This SMT runs in the SINK connector and changes the topic metadata
+ * so the MongoDB connector can route to the correct collection using
+ * the topic name, which works even for tombstones (null values).
  */
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
-
-    private static final String COLLECTION_HEADER_NAME = "__collection";
 
     @Override
     public void configure(Map<String, ?> configs) {
@@ -27,9 +29,10 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
     @Override
     public R apply(R record) {
-        // Skip if no value (tombstone) - but still process to keep headers
+        // Skip if no value (tombstone) - but still need to extract topic from key
         if (record.value() == null) {
-            // Tombstone - headers should already be set from previous delete event
+            // This is a tombstone (second message in delete sequence)
+            // Pass through as-is - the previous delete event already set the topic
             return record;
         }
 
@@ -55,7 +58,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             return record;
         }
 
-        // Get the table name
+        // Get the table name - this becomes our new topic name
         String tableName = (String) source.get("table");
         if (tableName == null) {
             return record;
@@ -63,7 +66,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
         // Create the new value based on operation type
         Map<String, Object> newValue;
-        R newRecord;
 
         switch (op != null ? op : "") {
             case "c": // Create
@@ -75,13 +77,12 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     return record;
                 }
                 
-                // Create new value with just the after fields plus collection for routing
+                // Create new value with just the after fields (no metadata)
                 newValue = new HashMap<>(after);
-                newValue.put("__collection", tableName);
                 
-                // Create new record with collection header
-                newRecord = record.newRecord(
-                    record.topic(),
+                // Return new record with CHANGED TOPIC NAME
+                return record.newRecord(
+                    tableName.toLowerCase(),  // TOPIC NAME = table name for routing!
                     record.kafkaPartition(),
                     record.keySchema(),
                     record.key(),
@@ -89,39 +90,25 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     newValue,
                     record.timestamp()
                 );
-                
-                // Add collection name to headers as well (for future use)
-                newRecord.headers().addString(COLLECTION_HEADER_NAME, tableName);
-                return newRecord;
 
             case "d": // Delete
-                // For deletes, use 'before' data and add __deleted marker (soft delete)
-                Map<String, Object> before = (Map<String, Object>) value.get("before");
-                if (before == null) {
-                    // If no before data, skip
-                    return record;
-                }
-                
-                newValue = new HashMap<>(before);
-                newValue.put("__collection", tableName);
-                newValue.put("__deleted", true);
-                
-                newRecord = record.newRecord(
-                    record.topic(),
+                // For deletes, return null value (tombstone) with CHANGED TOPIC NAME
+                // MongoDB connector will perform real delete when it sees:
+                // - delete.on.null.values=true
+                // - null value (tombstone)
+                // - topic name for collection routing
+                return record.newRecord(
+                    tableName.toLowerCase(),  // TOPIC NAME = table name for routing!
                     record.kafkaPartition(),
                     record.keySchema(),
                     record.key(),
-                    null, // schema-less
-                    newValue,
+                    null, // schema
+                    null, // null value = tombstone for real delete
                     record.timestamp()
                 );
-                
-                // Add collection name to headers
-                newRecord.headers().addString(COLLECTION_HEADER_NAME, tableName);
-                return newRecord;
 
             default:
-                // Unknown operation, pass through
+                // Unknown operation, pass through unchanged
                 return record;
         }
     }
