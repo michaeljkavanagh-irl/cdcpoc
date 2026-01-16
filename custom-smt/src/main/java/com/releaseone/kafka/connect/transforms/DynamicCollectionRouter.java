@@ -82,7 +82,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 
                 // Return new record with CHANGED TOPIC NAME
                 return record.newRecord(
-                    tableName.toLowerCase(),  // TOPIC NAME = table name for routing!
+                    tableName,  // TOPIC NAME = table name for routing!
                     record.kafkaPartition(),
                     record.keySchema(),
                     record.key(),
@@ -98,7 +98,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 // - null value (tombstone)
                 // - topic name for collection routing
                 return record.newRecord(
-                    tableName.toLowerCase(),  // TOPIC NAME = table name for routing!
+                    tableName,  // TOPIC NAME = table name for routing!
                     record.kafkaPartition(),
                     record.keySchema(),
                     record.key(),
