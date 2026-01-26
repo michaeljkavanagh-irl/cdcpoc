@@ -1,0 +1,12 @@
+FROM confluentinc/cp-kafka-connect:7.8.0
+
+# Install connectors
+RUN confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.2.1 && \
+    confluent-hub install --no-prompt mongodb/kafka-connect-mongodb:latest && \
+    confluent-hub install --no-prompt jcustenborder/kafka-config-provider-aws:0.1.4
+
+# Copy custom SMT
+COPY custom-smt/target/dynamic-collection-router-1.0-SNAPSHOT.jar /usr/share/java/kafka-connect-plugins/
+
+# Ensure proper permissions
+USER appuser

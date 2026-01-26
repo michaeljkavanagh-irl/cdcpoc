@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-connect
+  namespace: kafka
+  annotations:
+    # Replace with your actual IAM role ARN
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/KafkaConnectSecretsRole
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+  namespace: kafka
+spec:
+  ports:
+    - name: rest-api
+      port: 8083
+      targetPort: 8083
+  selector:
+    app: kafka-connect
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+  namespace: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-connect
+  template:
+    metadata:
+      labels:
+        app: kafka-connect
+    spec:
+      serviceAccountName: kafka-connect
+      containers:
+      - name: kafka-connect
+        image: YOUR_ECR_REPO/kafka-connect:latest
+        ports:
+        - containerPort: 8083
+          name: rest-api
+        env:
+        # Kafka Connection
+        - name: CONNECT_BOOTSTRAP_SERVERS
+          value: "kafka-broker-1:9092,kafka-broker-2:9092,kafka-broker-3:9092"
+        - name: CONNECT_REST_ADVERTISED_HOST_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: CONNECT_REST_PORT
+          value: "8083"
+        
+        # Connect Configuration
+        - name: CONNECT_GROUP_ID
+          value: "kafka-connect-cluster"
+        - name: CONNECT_CONFIG_STORAGE_TOPIC
+          value: "connect-configs"
+        - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
+          value: "3"
+        - name: CONNECT_OFFSET_STORAGE_TOPIC
+          value: "connect-offsets"
+        - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
+          value: "3"
+        - name: CONNECT_STATUS_STORAGE_TOPIC
+          value: "connect-status"
+        - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
+          value: "3"
+        
+        # Converters
+        - name: CONNECT_KEY_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        - name: CONNECT_VALUE_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        
+        # Plugin Path
+        - name: CONNECT_PLUGIN_PATH
+          value: "/usr/share/java,/usr/share/confluent-hub-components"
+        
+        # AWS Secrets Manager ConfigProvider
+        - name: CONNECT_CONFIG_PROVIDERS
+          value: "secretsmanager"
+        - name: CONNECT_CONFIG_PROVIDERS_SECRETSMANAGER_CLASS
+          value: "com.github.jcustenborder.kafka.config.aws.SecretsManagerConfigProvider"
+        - name: CONNECT_CONFIG_PROVIDERS_SECRETSMANAGER_PARAM_AWS_REGION
+          value: "us-east-1"
+        
+        # Logging
+        - name: CONNECT_LOG4J_LOGGERS
+          value: "org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR,org.reflections=ERROR"
+        
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8083
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8083
+          initialDelaySeconds: 30
+          periodSeconds: 10
