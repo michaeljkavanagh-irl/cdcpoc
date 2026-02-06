@@ -58,7 +58,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             return record;
         }
 
-        // Get the table name - this becomes our new topic name
+        // Get the table name - this will be added to message for collection routing
         String tableName = (String) source.get("table");
         if (tableName == null) {
             return record;
@@ -80,9 +80,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 // Create new value with just the after fields (no metadata)
                 newValue = new HashMap<>(after);
                 
-                // Return new record with CHANGED TOPIC NAME
+                // Return record with table name as topic for collection routing
                 return record.newRecord(
-                    tableName,  // TOPIC NAME = table name for routing!
+                    tableName,  // Use table name as topic
                     record.kafkaPartition(),
                     record.keySchema(),
                     record.key(),
@@ -92,16 +92,20 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 );
 
             case "d": // Delete
-                // For deletes, return null value (tombstone) with CHANGED TOPIC NAME
+                // For deletes, use table name as topic for routing
                 // MongoDB connector will perform real delete when it sees:
                 // - delete.on.null.values=true
                 // - null value (tombstone)
-                // - topic name for collection routing
+                Map<String, Object> newKey = new HashMap<>();
+                if (record.key() != null && record.key() instanceof Map) {
+                    newKey.putAll((Map<String, Object>) record.key());
+                }
+                
                 return record.newRecord(
-                    tableName,  // TOPIC NAME = table name for routing!
+                    tableName,  // Use table name as topic
                     record.kafkaPartition(),
                     record.keySchema(),
-                    record.key(),
+                    newKey,
                     null, // schema
                     null, // null value = tombstone for real delete
                     record.timestamp()

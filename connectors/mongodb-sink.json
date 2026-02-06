@@ -3,7 +3,7 @@
   "config": {
     "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
     "tasks.max": "1",
-    "topics.regex": ".*",
+    "topics.regex": "^(?!mongodb-sink-dlq$|__consumer_offsets|docker-connect-).*",
     "connection.uri": "mongodb+srv://${env:MONGODB_USER}:${env:MONGODB_PASSWORD}@${env:MONGODB_CLUSTER}/?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true",
     "database": "${env:MONGODB_DATABASE}",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -22,6 +22,9 @@
     "retries.defer.timeout": "5000",
     "errors.tolerance": "all",
     "errors.log.enable": "true",
-    "errors.log.include.messages": "true"
+    "errors.log.include.messages": "true",
+    "errors.deadletterqueue.topic.name": "mongodb-sink-dlq",
+    "errors.deadletterqueue.topic.replication.factor": "1",
+    "errors.deadletterqueue.context.headers.enable": "true"
   }
 }
