@@ -14,11 +14,16 @@ import java.util.Map;
  * 1. Extracts the table name from Debezium CDC envelope
  * 2. Unwraps the 'after' field to get the actual record data
  * 3. Changes the topic name to the table name for collection routing
- * 4. Handles all CRUD operations including real deletes
+ * 4. Adds _businessKey field with the primary key value for MongoDB matching
+ * 5. Handles all CRUD operations including real deletes
  * 
  * This SMT runs in the SINK connector and changes the topic metadata
  * so the MongoDB connector can route to the correct collection using
  * the topic name, which works even for tombstones (null values).
+ * 
+ * The _businessKey field allows MongoDB's ReplaceOneBusinessKeyStrategy
+ * to match documents for updates/deletes regardless of the actual
+ * primary key column name in different source tables.
  */
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -78,14 +83,25 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 }
                 
                 // Create new value with just the after fields (no metadata)
+                // Primary key fields are already included in 'after'
                 newValue = new HashMap<>(after);
+                
+                // Add _businessKey field for MongoDB matching
+                // This field is NOT from Oracle - it's added for CDC matching purposes
+                if (record.key() != null && record.key() instanceof Map) {
+                    Map<String, Object> keyMap = (Map<String, Object>) record.key();
+                    
+                    // Create composite key structure for matching
+                    Map<String, Object> businessKey = new HashMap<>(keyMap);
+                    newValue.put("_businessKey", businessKey);
+                }
                 
                 // Return record with table name as topic for collection routing
                 return record.newRecord(
                     tableName,  // Use table name as topic
                     record.kafkaPartition(),
                     record.keySchema(),
-                    record.key(),
+                    record.key(),  // Keep original key
                     null, // schema-less
                     newValue,
                     record.timestamp()

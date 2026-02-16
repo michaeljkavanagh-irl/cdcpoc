@@ -48,13 +48,37 @@ MongoDB Atlas (Multiple Collections)
 
 The custom Single Message Transform handles:
 - **Envelope Unwrapping**: Extracts `after` field for CREATE/READ/UPDATE operations
-- **Collection Routing**: Adds `__collection` field based on source table name
-- **Soft Deletes**: For DELETE operations, uses `before` data + `__deleted: true` marker
-- **Header Injection**: Adds collection name to message headers
+- **Collection Routing**: Routes messages to appropriate MongoDB collections based on source table name
+- **Business Key Injection**: Adds `_businessKey` field containing primary key values for CDC matching
+- **Delete Handling**: Creates tombstone messages for DELETE operations
 
 **Operation Handling:**
-- `INSERT/UPDATE`: Document contains latest data
-- `DELETE`: Document preserved with `__deleted: true` and last known state
+- `INSERT/UPDATE`: Document contains latest data + `_businessKey` field
+- `DELETE`: Tombstone message with key for deletion
+
+### Custom Write Model Strategies
+
+The pipeline uses two custom MongoDB write strategies to enable CDC with auto-generated ObjectIds:
+
+#### UpsertByBusinessKeyStrategy
+Handles INSERT and UPDATE operations by:
+- **Matching on Business Key**: Uses `_businessKey` field (not `_id`) to find existing documents
+- **Preserving ObjectId**: Allows MongoDB to auto-generate ObjectId for `_id` field on inserts
+- **Safe Updates**: Removes `_id` from update operations to prevent immutable field errors
+- **Upsert Logic**: Inserts new documents or updates existing ones based on business key match
+- **Composite Key Support**: Handles both single and multi-field primary keys
+
+#### DeleteByBusinessKeyStrategy
+Handles DELETE operations by:
+- **Primary Key Matching**: Matches documents using source table primary key fields
+- **Clean Deletes**: Removes documents from MongoDB when deleted in PostgreSQL
+- **Composite Key Support**: Handles multi-field primary keys with AND filters
+
+**Benefits:**
+- MongoDB collections have clean ObjectId-based `_id` fields (compatible with existing applications)
+- CDC operations match on business keys instead of `_id`, avoiding nested document IDs
+- Supports tables with both single and composite primary keys
+- Eliminates need to modify `_id` during updates
 
 ## Prerequisites
 
@@ -96,7 +120,7 @@ POSTGRES_DB=northwind
 POSTGRES_PORT=5434
 ```
 
-### 3. Build Custom SMT
+### 3. Build Custom Components
 
 ```bash
 cd custom-smt
@@ -104,7 +128,9 @@ mvn clean package
 cd ..
 ```
 
-This creates `kafka-connect-dynamic-router-1.0.0.jar` in `custom-smt/target/`
+This creates two JARs in `custom-smt/target/`:
+- `kafka-connect-dynamic-router-1.0.0-smt.jar` - Custom SMT
+- `kafka-connect-dynamic-router-1.0.0-strategy.jar` - Custom write strategies
 
 ### 4. Start Infrastructure
 
@@ -112,35 +138,19 @@ This creates `kafka-connect-dynamic-router-1.0.0.jar` in `custom-smt/target/`
 docker-compose up -d
 ```
 
-Wait 2-3 minutes for all services to start and connectors to be installed.
+Wait 60-90 seconds for all services to start. The custom Docker image automatically:
+- Installs Debezium PostgreSQL and MongoDB connectors
+- Bakes in the custom strategy and SMT JARs
+- No manual JAR copying needed!
 
 Check Kafka Connect is ready:
 ```bash
 curl http://localhost:8083/
 ```
 
-### 5. Deploy Custom SMT
+### 5. Deploy Connectors
 
-```bash
-docker cp custom-smt/target/kafka-connect-dynamic-router-1.0.0.jar \
-  kafka-connect:/usr/share/java/kafka/
-```
-
-Restart Kafka Connect to load the SMT:
-```bash
-docker restart kafka-connect
-sleep 15
-```
-
-### 6. Deploy Connectors
-
-Use the provided deployment script:
-
-```bash
-./deploy-connectors.sh
-```
-
-Or deploy manually:
+Deploy both connectors:
 
 ```bash
 # Deploy PostgreSQL Source Connector
@@ -151,10 +161,10 @@ curl -X POST http://localhost:8083/connectors \
 # Deploy MongoDB Sink Connector
 curl -X POST http://localhost:8083/connectors \
   -H "Content-Type: application/json" \
-  -d @connectors/mongodb-sink.json
+  -d @connectors/mongodb-sink-with-strategy.json
 ```
 
-### 7. Verify Setup
+### 6. Verify Setup
 
 Check connector status:
 ```bash
@@ -177,51 +187,54 @@ docker exec -it postgres-migrator-sample psql -U postgres -d northwind -c \
 ### Verify in MongoDB
 
 ```bash
-mongosh "mongodb+srv://<user>:<password>@<cluster>/?retryWrites=true&w=majority" \
-  --eval "use testdb; db.products.findOne({product_id: 999})"
+mongosh "mongodb+srv://<user>:<password>@<cluster>/<database>?retryWrites=true&w=majority" \
+  --eval "db.EMPLOYEES.findOne({id: 1})"
 ```
 
 Expected result:
 ```javascript
 {
-  _id: { product_id: 999 },
-  product_id: 999,
-  product_name: 'Test Product',
-  supplier_id: 1,
-  category_id: 1,
-  unit_price: 25.99,
-  // ... other fields
+  _id: ObjectId("507f1f77bcf86cd799439011"),  // Auto-generated ObjectId
+  _businessKey: { id: 1 },                    // Business key for CDC matching
+  id: 1,                                      // Original primary key
+  name: "John Smith",
+  department: "Engineering",
+  salary: 85000,
+  hired_date: 18276
 }
 ```
 
 ### Test Update
 
 ```bash
-docker exec -it postgres-migrator-sample psql -U postgres -d northwind -c \
-  "UPDATE products SET product_name = 'Updated Product' WHERE product_id = 999;"
+docker exec postgres-source psql -U postgres -d northwind -c \
+  "UPDATE \"EMPLOYEES\" SET salary = 90000 WHERE id = 1;"
 ```
 
-### Test Delete (Soft Delete)
-
-```bash
-docker exec -it postgres-migrator-sample psql -U postgres -d northwind -c \
-  "DELETE FROM products WHERE product_id = 999;"
-```
-
-Verify soft delete marker:
-```bash
-mongosh ... --eval "use testdb; db.products.findOne({product_id: 999})"
-```
-
-Expected result:
+Verify in MongoDB (same ObjectId preserved):
 ```javascript
 {
-  _id: { product_id: 999 },
-  __deleted: true,  // Soft delete marker
-  product_id: 999,
-  product_name: 'Updated Product',
-  // ... fields from last known state
+  _id: ObjectId("507f1f77bcf86cd799439011"),  // Same ObjectId as before
+  _businessKey: { id: 1 },
+  id: 1,
+  name: "John Smith",
+  department: "Engineering",
+  salary: 90000,                              // Updated value
+  hired_date: 18276
 }
+```
+
+### Test Delete
+
+```bash
+docker exec postgres-source psql -U postgres -d northwind -c \
+  "DELETE FROM \"EMPLOYEES\" WHERE id = 1;"
+```
+
+Verify deletion (document removed from MongoDB):
+```bash
+mongosh ... --eval "db.EMPLOYEES.findOne({id: 1})"
+# Returns: null
 ```
 
 ## Configuration Details
@@ -364,7 +377,42 @@ mongosh ... --eval "
 ## Project Structure
 
 ```
-cdcflow/
+vanillaflow/
+├── connectors/
+│   ├── mongodb-sink-with-strategy.json  # MongoDB sink with custom strategies
+│   └── postgres-source.json             # Debezium PostgreSQL source
+├── custom-smt/
+│   ├── src/main/java/com/releaseone/kafka/connect/
+│   │   ├── strategies/
+│   │   │   ├── UpsertByBusinessKeyStrategy.java   # Custom upsert strategy
+│   │   │   └── DeleteByBusinessKeyStrategy.java   # Custom delete strategy
+│   │   └── transforms/
+│   │       └── DynamicCollectionRouter.java       # Custom SMT
+│   └── pom.xml                          # Maven build configuration
+├── init.sql/
+│   └── init.sql                         # Northwind database schema
+├── Dockerfile.kafka-connect             # Custom Kafka Connect image with strategies
+├── docker-compose.yml                   # Infrastructure orchestration
+├── .env                                 # Environment variables (git-ignored)
+├── .env.example                         # Template for environment setup
+└── README.md                            # This file
+```
+
+### Key Files
+
+**Custom Strategies:**
+- `UpsertByBusinessKeyStrategy.java` - Handles INSERT/UPDATE operations with ObjectId-based _id fields
+- `DeleteByBusinessKeyStrategy.java` - Handles DELETE operations matching on business keys
+- Both strategies are compiled into `kafka-connect-dynamic-router-1.0.0-strategy.jar`
+
+**Custom SMT:**
+- `DynamicCollectionRouter.java` - Routes messages and adds business key fields
+- Compiled into `kafka-connect-dynamic-router-1.0.0-smt.jar`
+
+**Docker Configuration:**
+- `Dockerfile.kafka-connect` - Bakes custom JARs into Kafka Connect image
+- Strategy JAR placed in MongoDB connector's lib directory for classloader access
+- SMT JAR placed in Kafka's classpath for transformation access
 ├── connectors/
 │   ├── postgres-source.json      # Debezium source connector config
 │   └── mongodb-sink.json          # MongoDB sink connector config

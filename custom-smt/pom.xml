@@ -41,14 +41,14 @@
         <dependency>
             <groupId>org.mongodb.kafka</groupId>
             <artifactId>mongo-kafka-connect</artifactId>
-            <version>1.11.0</version>
-            <scope>provided</scope>
+            <version>2.0.3</version>
+            <scope>compile</scope>
         </dependency>
         <dependency>
             <groupId>org.mongodb</groupId>
             <artifactId>mongodb-driver-sync</artifactId>
             <version>4.9.0</version>
-            <scope>provided</scope>
+            <scope>compile</scope>
         </dependency>
     </dependencies>
 
@@ -63,16 +63,48 @@
                     <target>11</target>
                 </configuration>
             </plugin>
+            
+            <!-- Build SMT-only JAR -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.0</version>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
                 <executions>
+                    <!-- Default JAR with everything -->
                     <execution>
+                        <id>default-jar</id>
                         <phase>package</phase>
                         <goals>
-                            <goal>shade</goal>
+                            <goal>jar</goal>
                         </goals>
+                    </execution>
+                    <!-- SMT-only JAR -->
+                    <execution>
+                        <id>smt-only</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>smt</classifier>
+                            <includes>
+                                <include>com/releaseone/kafka/connect/transforms/**</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                    <!-- Strategy-only JAR -->
+                    <execution>
+                        <id>strategy-only</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>strategy</classifier>
+                            <includes>
+                                <include>com/releaseone/kafka/connect/strategies/**</include>
+                            </includes>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
