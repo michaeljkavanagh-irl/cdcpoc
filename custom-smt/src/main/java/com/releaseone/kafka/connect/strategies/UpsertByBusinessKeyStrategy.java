@@ -58,17 +58,18 @@ public class UpsertByBusinessKeyStrategy implements WriteModelStrategy {
 
     /**
      * Build MongoDB filter from business key fields
+     * Matches on nested _businessKey fields instead of top-level fields
      * Handles both single and composite keys
      */
     private Bson buildFilterFromBusinessKey(BsonDocument businessKey) {
         if (businessKey.size() == 1) {
-            // Single field - create simple equality filter on that field name
+            // Single field - create filter on nested _businessKey field
             Map.Entry<String, BsonValue> entry = businessKey.entrySet().iterator().next();
-            return Filters.eq(entry.getKey(), entry.getValue());
+            return Filters.eq("_businessKey." + entry.getKey(), entry.getValue());
         } else {
-            // Composite key - create AND filter with all fields
+            // Composite key - create AND filter with all nested _businessKey fields
             Bson[] filters = businessKey.entrySet().stream()
-                .map(entry -> Filters.eq(entry.getKey(), entry.getValue()))
+                .map(entry -> Filters.eq("_businessKey." + entry.getKey(), entry.getValue()))
                 .toArray(Bson[]::new);
             return Filters.and(filters);
         }
