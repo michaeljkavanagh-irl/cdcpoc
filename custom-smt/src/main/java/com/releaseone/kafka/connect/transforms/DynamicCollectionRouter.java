@@ -34,13 +34,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
     @Override
     public R apply(R record) {
-        // Skip if no value (tombstone) - but still need to extract topic from key
-        if (record.value() == null) {
-            // This is a tombstone (second message in delete sequence)
-            // Pass through as-is - the previous delete event already set the topic
-            return record;
-        }
-
         // Handle schema-less JSON (Map)
         if (record.valueSchema() == null) {
             return applySchemaless(record);
@@ -83,18 +76,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 }
                 
                 // Create new value with just the after fields (no metadata)
-                // Primary key fields are already included in 'after'
+                // Primary key fields are already included in 'after' at the top level
+                // ReplaceOneBusinessKeyStrategy will match on these top-level fields
                 newValue = new HashMap<>(after);
-                
-                // Add _businessKey field for MongoDB matching
-                // This field is NOT from Oracle - it's added for CDC matching purposes
-                if (record.key() != null && record.key() instanceof Map) {
-                    Map<String, Object> keyMap = (Map<String, Object>) record.key();
-                    
-                    // Create composite key structure for matching
-                    Map<String, Object> businessKey = new HashMap<>(keyMap);
-                    newValue.put("_businessKey", businessKey);
-                }
                 
                 // Return record with table name as topic for collection routing
                 return record.newRecord(
@@ -104,26 +88,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     record.key(),  // Keep original key
                     null, // schema-less
                     newValue,
-                    record.timestamp()
-                );
-
-            case "d": // Delete
-                // For deletes, use table name as topic for routing
-                // MongoDB connector will perform real delete when it sees:
-                // - delete.on.null.values=true
-                // - null value (tombstone)
-                Map<String, Object> newKey = new HashMap<>();
-                if (record.key() != null && record.key() instanceof Map) {
-                    newKey.putAll((Map<String, Object>) record.key());
-                }
-                
-                return record.newRecord(
-                    tableName,  // Use table name as topic
-                    record.kafkaPartition(),
-                    record.keySchema(),
-                    newKey,
-                    null, // schema
-                    null, // null value = tombstone for real delete
                     record.timestamp()
                 );
 
