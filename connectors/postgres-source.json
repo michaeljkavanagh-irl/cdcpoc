@@ -21,6 +21,7 @@
     "snapshot.mode": "initial",
     "time.precision.mode": "connect",
     "decimal.handling.mode": "double",
+    "tombstones.on.delete": "true",
     "transforms": "routeRows",
     "transforms.routeRows.type": "org.apache.kafka.connect.transforms.RegexRouter",
     "transforms.routeRows.regex": ".*",

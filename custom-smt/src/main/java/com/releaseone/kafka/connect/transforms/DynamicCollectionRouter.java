@@ -5,6 +5,8 @@ import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.header.Headers;
 import org.apache.kafka.connect.transforms.Transformation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -27,6 +29,8 @@ import java.util.Map;
  */
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
 
+
+
     @Override
     public void configure(Map<String, ?> configs) {
         // No configuration needed
@@ -34,6 +38,11 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
     @Override
     public R apply(R record) {
+        // Skip tombstones - pass them through unchanged
+        if (record.value() == null) {
+            return record;
+        }
+        
         // Handle schema-less JSON (Map)
         if (record.valueSchema() == null) {
             return applySchemaless(record);
@@ -46,6 +55,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     @SuppressWarnings("unchecked")
     private R applySchemaless(R record) {
         Map<String, Object> value = (Map<String, Object>) record.value();
+        if (value == null) {
+            return record;
+        }
 
         // Extract the operation type
         String op = (String) value.get("op");
@@ -76,8 +88,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 }
                 
                 // Create new value with just the after fields (no metadata)
-                // Primary key fields are already included in 'after' at the top level
-                // ReplaceOneBusinessKeyStrategy will match on these top-level fields
                 newValue = new HashMap<>(after);
                 
                 // Return record with table name as topic for collection routing
@@ -88,6 +98,19 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     record.key(),  // Keep original key
                     null, // schema-less
                     newValue,
+                    record.timestamp()
+                );
+
+            case "d": // Delete
+                // For deletes, emit a tombstone while routing by table name.
+                // Keep the key so the sink can identify which document to delete.
+                return record.newRecord(
+                    tableName,
+                    record.kafkaPartition(),
+                    record.keySchema(),
+                    record.key(),
+                    null,
+                    null,
                     record.timestamp()
                 );
 

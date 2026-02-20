@@ -13,7 +13,7 @@ import org.bson.conversions.Bson;
 import java.util.Map;
 
 /**
- * Custom delete strategy that matches documents using _businessKey field
+ * Custom delete strategy that matches documents using business key fields
  * instead of _id for delete operations in CDC scenarios.
  */
 public class DeleteByBusinessKeyStrategy extends DeleteOneDefaultStrategy {
@@ -28,25 +28,24 @@ public class DeleteByBusinessKeyStrategy extends DeleteOneDefaultStrategy {
             throw new DataException("Empty key document - cannot determine which document to delete");
         }
 
-        // Build filter using all fields from the key document
+        // Build filter using all fields from the key document (no _businessKey prefix)
         Bson filter = buildFilterFromKey(keyDoc);
 
         return new DeleteOneModel<>(filter);
     }
 
     /**
-     * Build MongoDB filter from key fields
-     * Matches on nested _businessKey fields instead of top-level fields
+     * Build MongoDB filter from key fields (no _businessKey prefix)
      */
     private Bson buildFilterFromKey(BsonDocument keyDoc) {
         if (keyDoc.size() == 1) {
-            // Single field - create filter on nested _businessKey field
+            // Single field - create filter on the key field directly
             Map.Entry<String, BsonValue> entry = keyDoc.entrySet().iterator().next();
-            return Filters.eq("_businessKey." + entry.getKey(), entry.getValue());
+            return Filters.eq(entry.getKey(), entry.getValue());
         } else {
-            // Composite key - create AND filter with all nested _businessKey fields
+            // Composite key - create AND filter with all key fields directly
             Bson[] filters = keyDoc.entrySet().stream()
-                .map(entry -> Filters.eq("_businessKey." + entry.getKey(), entry.getValue()))
+                .map(entry -> Filters.eq(entry.getKey(), entry.getValue()))
                 .toArray(Bson[]::new);
             return Filters.and(filters);
         }
