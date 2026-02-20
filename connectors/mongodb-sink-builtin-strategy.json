@@ -14,6 +14,7 @@
   "namespace.mapper.collection": "${topic}",
   "document.id.strategy": "com.mongodb.kafka.connect.sink.processor.id.strategy.FullKeyStrategy",
   "writemodel.strategy": "com.mongodb.kafka.connect.sink.writemodel.strategy.ReplaceOneBusinessKeyStrategy",
+  "delete.writemodel.strategy": "com.releaseone.kafka.connect.strategies.DeleteByBusinessKeyStrategy",
   "delete.on.null.values": "true",
   "max.num.retries": "3",
   "retries.defer.timeout": "5000",
