@@ -31,6 +31,10 @@ import java.util.Map;
  * the topic name, which works even for tombstones (null values).
  * Supports both schema-less (Map) and schema-enabled (Struct) records.
  * Includes optional type normalization using Debezium source column type hints.
+ *
+ * Connector config controls:
+ * - transforms.route.normalization.enabled=true|false
+ * - transforms.route.type.mapping.mode=oracle|postgres
  */
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
     private static final String NORMALIZATION_ENABLED_CONFIG = "normalization.enabled";
