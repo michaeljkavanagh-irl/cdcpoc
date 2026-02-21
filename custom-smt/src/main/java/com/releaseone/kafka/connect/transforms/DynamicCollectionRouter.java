@@ -4,7 +4,9 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.transforms.Transformation;
 
 import java.nio.ByteBuffer;
@@ -18,6 +20,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Custom SMT that:
@@ -50,6 +53,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         ORACLE_TYPE_MAPPING.put("NCHAR", "string");      // Postgres equivalent: CHAR, CHARACTER
         ORACLE_TYPE_MAPPING.put("NVARCHAR2", "string");  // Postgres: VARCHAR
         ORACLE_TYPE_MAPPING.put("INTEGER", "int");       // Postgres: INTEGER, INT4
+        ORACLE_TYPE_MAPPING.put("NUMBER", "decimal");    // Precision/scale-aware override in code
         ORACLE_TYPE_MAPPING.put("FLOAT", "double");      // Postgres: DOUBLE PRECISION
         ORACLE_TYPE_MAPPING.put("BINARY_FLOAT", "double");  // Postgres: REAL
         ORACLE_TYPE_MAPPING.put("BINARY_DOUBLE", "double"); // Postgres: DOUBLE PRECISION
@@ -255,23 +259,97 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     private Struct normalizeStruct(Struct after) {
-        Struct normalized = new Struct(after.schema());
+        Schema normalizedSchema = buildNormalizedSchema(after.schema());
+        Struct normalized = new Struct(normalizedSchema);
         for (Field field : after.schema().fields()) {
             Object rawValue = after.get(field);
             String mappedTargetType = mappedTargetType(field.schema());
             Object normalizedValue = normalizeValue(rawValue, mappedTargetType);
-            normalized.put(field, normalizedValue);
+            Field normalizedField = normalizedSchema.field(field.name());
+            normalized.put(normalizedField, normalizedValue);
         }
         return normalized;
     }
 
+    private Schema buildNormalizedSchema(Schema originalSchema) {
+        SchemaBuilder builder = SchemaBuilder.struct();
+        if (originalSchema.name() != null) {
+            builder.name(originalSchema.name());
+        }
+        if (originalSchema.version() != null) {
+            builder.version(originalSchema.version());
+        }
+        if (originalSchema.doc() != null) {
+            builder.doc(originalSchema.doc());
+        }
+
+        for (Field field : originalSchema.fields()) {
+            String mappedTargetType = mappedTargetType(field.schema());
+            builder.field(field.name(), buildFieldSchema(field.schema(), mappedTargetType));
+        }
+
+        return builder.build();
+    }
+
+    private Schema buildFieldSchema(Schema originalFieldSchema, String targetType) {
+        if (originalFieldSchema == null || targetType == null) {
+            return originalFieldSchema;
+        }
+
+        SchemaBuilder builder;
+        switch (targetType) {
+            case "string":
+                builder = SchemaBuilder.string();
+                break;
+            case "int":
+                builder = SchemaBuilder.int32();
+                break;
+            case "long":
+                builder = SchemaBuilder.int64();
+                break;
+            case "double":
+                builder = SchemaBuilder.float64();
+                break;
+            case "date":
+                builder = Timestamp.builder();
+                break;
+            case "binData":
+                builder = SchemaBuilder.bytes();
+                break;
+            case "decimal":
+            default:
+                return originalFieldSchema;
+        }
+
+        if (originalFieldSchema.isOptional()) {
+            builder.optional();
+        }
+        if (originalFieldSchema.doc() != null) {
+            builder.doc(originalFieldSchema.doc());
+        }
+        return builder.build();
+    }
+
     private String mappedTargetType(Schema schema) {
-        if (schema == null || schema.parameters() == null) {
+        if (schema == null) {
             return null;
+        }
+        Map<String, String> parameters = schema.parameters();
+        if (parameters == null) {
+            parameters = new HashMap<>();
+        }
+
+        // Connect Decimal logical type path (e.g. decimal.handling.mode=precise).
+        if ("org.apache.kafka.connect.data.Decimal".equals(schema.name())) {
+            return mapNumericByPrecisionScale(parameters);
+        }
+        // Debezium Postgres INTERVAL logical type path.
+        if ("io.debezium.time.MicroDuration".equals(schema.name())) {
+            return "string";
         }
 
         String sourceType = null;
-        for (Map.Entry<String, String> entry : schema.parameters().entrySet()) {
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
             String key = entry.getKey();
             if (key != null && key.toLowerCase().contains("column.type")) {
                 sourceType = entry.getValue();
@@ -283,7 +361,62 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         }
 
         String normalized = normalizeSourceType(sourceType);
-        return activeTypeMapping.get(normalized);
+
+        // Handle timestamp variations (e.g. TIMESTAMP(6), TIMESTAMP WITH TIME ZONE).
+        if (normalized.startsWith("TIMESTAMP")) {
+            return "date";
+        }
+        // Handle interval variations (e.g. INTERVAL DAY TO SECOND).
+        if (normalized.startsWith("INTERVAL")) {
+            return "string";
+        }
+
+        // Precision/scale-aware routing for numeric families.
+        if ("NUMBER".equals(normalized) || "NUMERIC".equals(normalized) || "DECIMAL".equals(normalized)) {
+            return mapNumericByPrecisionScale(parameters);
+        }
+        // Default fallback for any recognized source type not explicitly mapped.
+        return activeTypeMapping.getOrDefault(normalized, "string");
+    }
+
+    private String mapNumericByPrecisionScale(Map<String, String> parameters) {
+        Integer scale = parseNumericParameter(parameters, "scale");
+        if (scale != null && scale > 0) {
+            return "decimal";
+        }
+
+        Integer precision = parseNumericParameter(parameters, "precision");
+        if (precision != null) {
+            if (precision <= 9) {
+                return "int";
+            }
+            if (precision <= 18) {
+                return "long";
+            }
+            return "decimal";
+        }
+
+        return "decimal";
+    }
+
+    private Integer parseNumericParameter(Map<String, String> parameters, String keyHint) {
+        Optional<Map.Entry<String, String>> match = parameters.entrySet().stream()
+            .filter(e -> e.getKey() != null && e.getKey().toLowerCase(Locale.ROOT).contains(keyHint))
+            .findFirst();
+
+        if (match.isEmpty()) {
+            return null;
+        }
+
+        String raw = match.get().getValue();
+        if (raw == null || raw.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private String normalizeSourceType(String sourceType) {
@@ -307,10 +440,14 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 return toInteger(value);
             case "double":
                 return toDouble(value);
+            case "long":
+                return toLong(value);
             case "date":
                 return toDate(value);
             case "binData":
                 return toBinary(value);
+            case "decimal":
+                return value;
             default:
                 return value;
         }
@@ -343,6 +480,23 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (value instanceof String) {
             try {
                 return Double.parseDouble((String) value);
+            } catch (NumberFormatException e) {
+                return value;
+            }
+        }
+        return value;
+    }
+
+    private Object toLong(Object value) {
+        if (value instanceof Long) {
+            return value;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        if (value instanceof String) {
+            try {
+                return Long.parseLong((String) value);
             } catch (NumberFormatException e) {
                 return value;
             }
