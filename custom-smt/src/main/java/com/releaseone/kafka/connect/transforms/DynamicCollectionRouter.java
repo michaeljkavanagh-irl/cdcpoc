@@ -3,10 +3,8 @@ package com.releaseone.kafka.connect.transforms;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.header.Headers;
+import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.transforms.Transformation;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -16,16 +14,12 @@ import java.util.Map;
  * 1. Extracts the table name from Debezium CDC envelope
  * 2. Unwraps the 'after' field to get the actual record data
  * 3. Changes the topic name to the table name for collection routing
- * 4. Adds _businessKey field with the primary key value for MongoDB matching
- * 5. Handles all CRUD operations including real deletes
+ * 4. Handles all CRUD operations including real deletes
  * 
  * This SMT runs in the SINK connector and changes the topic metadata
  * so the MongoDB connector can route to the correct collection using
  * the topic name, which works even for tombstones (null values).
- * 
- * The _businessKey field allows MongoDB's ReplaceOneBusinessKeyStrategy
- * to match documents for updates/deletes regardless of the actual
- * primary key column name in different source tables.
+ * Supports both schema-less (Map) and schema-enabled (Struct) records.
  */
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
 
@@ -48,8 +42,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             return applySchemaless(record);
         }
 
-        // For now, only handle schema-less JSON
-        return record;
+        return applyWithSchema(record);
     }
 
     @SuppressWarnings("unchecked")
@@ -116,6 +109,60 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
             default:
                 // Unknown operation, pass through unchanged
+                return record;
+        }
+    }
+
+    private R applyWithSchema(R record) {
+        if (!(record.value() instanceof Struct)) {
+            return record;
+        }
+
+        Struct envelope = (Struct) record.value();
+        String op = envelope.getString("op");
+
+        Struct source = envelope.getStruct("source");
+        if (source == null) {
+            return record;
+        }
+
+        String tableName = source.getString("table");
+        if (tableName == null) {
+            return record;
+        }
+
+        switch (op != null ? op : "") {
+            case "c":
+            case "r":
+            case "u":
+                Struct after = envelope.getStruct("after");
+                if (after == null) {
+                    return record;
+                }
+                // Keep the table-routed topic, preserve key and typed "after" schema/value.
+                return record.newRecord(
+                    tableName,
+                    record.kafkaPartition(),
+                    record.keySchema(),
+                    record.key(),
+                    after.schema(),
+                    after,
+                    record.timestamp()
+                );
+
+            case "d":
+                // Emit tombstone for delete processing while preserving key and routed topic.
+                return record.newRecord(
+                    tableName,
+                    record.kafkaPartition(),
+                    record.keySchema(),
+                    record.key(),
+                    null,
+                    null,
+                    record.timestamp()
+                );
+
+            default:
                 return record;
         }
     }

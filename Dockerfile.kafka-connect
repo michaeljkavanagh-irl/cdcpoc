@@ -4,7 +4,10 @@ FROM confluentinc/cp-kafka-connect:7.8.0
 RUN confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.2.1 && \
     confluent-hub install --no-prompt mongodb/kafka-connect-mongodb:2.0.3
 
-# Copy custom strategy JAR into MongoDB connector plugin directory (CRITICAL for classloader)
+# Copy custom strategy JAR into MongoDB connector plugin directory (CRITICAL for classloader).
+# Keep a copy in both the plugin root and lib directory to satisfy connector plugin isolation.
+COPY custom-smt/target/kafka-connect-dynamic-router-1.0.0-strategy.jar \
+     /usr/share/confluent-hub-components/mongodb-kafka-connect-mongodb/
 COPY custom-smt/target/kafka-connect-dynamic-router-1.0.0-strategy.jar \
      /usr/share/confluent-hub-components/mongodb-kafka-connect-mongodb/lib/
 
