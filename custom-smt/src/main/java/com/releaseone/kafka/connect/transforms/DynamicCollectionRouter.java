@@ -3,6 +3,7 @@ package com.releaseone.kafka.connect.transforms;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
@@ -10,6 +11,8 @@ import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.transforms.Transformation;
 
 import java.nio.ByteBuffer;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -259,39 +262,36 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     private Struct normalizeStruct(Struct after) {
-        Schema normalizedSchema = buildNormalizedSchema(after.schema());
-        Struct normalized = new Struct(normalizedSchema);
+        SchemaBuilder builder = SchemaBuilder.struct();
+        if (after.schema().name() != null) {
+            builder.name(after.schema().name());
+        }
+        if (after.schema().version() != null) {
+            builder.version(after.schema().version());
+        }
+        if (after.schema().doc() != null) {
+            builder.doc(after.schema().doc());
+        }
+
+        Map<String, Object> normalizedValuesByField = new LinkedHashMap<>();
         for (Field field : after.schema().fields()) {
             Object rawValue = after.get(field);
             String mappedTargetType = mappedTargetType(field.schema());
-            Object normalizedValue = normalizeValue(rawValue, mappedTargetType);
-            Field normalizedField = normalizedSchema.field(field.name());
-            normalized.put(normalizedField, normalizedValue);
+            Object normalizedValue = normalizeValue(rawValue, mappedTargetType, field.schema());
+            Schema normalizedFieldSchema = buildFieldSchema(field.schema(), mappedTargetType, rawValue);
+            builder.field(field.name(), normalizedFieldSchema);
+            normalizedValuesByField.put(field.name(), normalizedValue);
+        }
+
+        Schema normalizedSchema = builder.build();
+        Struct normalized = new Struct(normalizedSchema);
+        for (Map.Entry<String, Object> entry : normalizedValuesByField.entrySet()) {
+            normalized.put(normalizedSchema.field(entry.getKey()), entry.getValue());
         }
         return normalized;
     }
 
-    private Schema buildNormalizedSchema(Schema originalSchema) {
-        SchemaBuilder builder = SchemaBuilder.struct();
-        if (originalSchema.name() != null) {
-            builder.name(originalSchema.name());
-        }
-        if (originalSchema.version() != null) {
-            builder.version(originalSchema.version());
-        }
-        if (originalSchema.doc() != null) {
-            builder.doc(originalSchema.doc());
-        }
-
-        for (Field field : originalSchema.fields()) {
-            String mappedTargetType = mappedTargetType(field.schema());
-            builder.field(field.name(), buildFieldSchema(field.schema(), mappedTargetType));
-        }
-
-        return builder.build();
-    }
-
-    private Schema buildFieldSchema(Schema originalFieldSchema, String targetType) {
+    private Schema buildFieldSchema(Schema originalFieldSchema, String targetType, Object rawValue) {
         if (originalFieldSchema == null || targetType == null) {
             return originalFieldSchema;
         }
@@ -317,6 +317,11 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 builder = SchemaBuilder.bytes();
                 break;
             case "decimal":
+                if ("io.debezium.data.VariableScaleDecimal".equals(originalFieldSchema.name())) {
+                    Integer scale = extractVariableScale(rawValue);
+                    builder = Decimal.builder(scale == null ? 0 : scale);
+                    break;
+                }
             default:
                 return originalFieldSchema;
         }
@@ -342,6 +347,10 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         // Connect Decimal logical type path (e.g. decimal.handling.mode=precise).
         if ("org.apache.kafka.connect.data.Decimal".equals(schema.name())) {
             return mapNumericByPrecisionScale(parameters);
+        }
+        // Debezium Oracle NUMBER without explicit precision/scale can arrive as VariableScaleDecimal.
+        if ("io.debezium.data.VariableScaleDecimal".equals(schema.name())) {
+            return "decimal";
         }
         // Debezium Postgres INTERVAL logical type path.
         if ("io.debezium.time.MicroDuration".equals(schema.name())) {
@@ -428,7 +437,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         return type;
     }
 
-    private Object normalizeValue(Object value, String targetType) {
+    private Object normalizeValue(Object value, String targetType, Schema sourceSchema) {
         if (value == null || targetType == null) {
             return value;
         }
@@ -447,10 +456,59 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             case "binData":
                 return toBinary(value);
             case "decimal":
+                if (sourceSchema != null && "io.debezium.data.VariableScaleDecimal".equals(sourceSchema.name())) {
+                    return variableScaleDecimalToBigDecimal(value);
+                }
                 return value;
             default:
                 return value;
         }
+    }
+
+    private Integer extractVariableScale(Object value) {
+        if (!(value instanceof Struct)) {
+            return null;
+        }
+        Struct decimalStruct = (Struct) value;
+        return decimalStruct.getInt32("scale");
+    }
+
+    private Object variableScaleDecimalToBigDecimal(Object value) {
+        if (!(value instanceof Struct)) {
+            return null;
+        }
+        Struct decimalStruct = (Struct) value;
+        Integer scale = decimalStruct.getInt32("scale");
+        Object raw = decimalStruct.get("value");
+        if (raw == null || scale == null) {
+            return null;
+        }
+
+        byte[] bytes = toBytes(raw);
+        if (bytes == null) {
+            return null;
+        }
+        return new BigDecimal(new BigInteger(bytes), scale);
+    }
+
+    private byte[] toBytes(Object value) {
+        if (value instanceof byte[]) {
+            return (byte[]) value;
+        }
+        if (value instanceof ByteBuffer) {
+            ByteBuffer buffer = ((ByteBuffer) value).asReadOnlyBuffer();
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            return bytes;
+        }
+        if (value instanceof String) {
+            try {
+                return Base64.getDecoder().decode((String) value);
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private Object toInteger(Object value) {
