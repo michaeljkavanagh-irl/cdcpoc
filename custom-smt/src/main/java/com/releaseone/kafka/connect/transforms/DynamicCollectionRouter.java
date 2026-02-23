@@ -144,6 +144,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (value == null) {
             return record;
         }
+        Object normalizedKey = normalizationEnabled ? normalizeSchemalessKey(record.key()) : record.key();
 
         // Extract the operation type
         String op = (String) value.get("op");
@@ -181,7 +182,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     tableName,  // Use table name as topic
                     record.kafkaPartition(),
                     record.keySchema(),
-                    record.key(),  // Keep original key
+                    normalizedKey,
                     null, // schema-less
                     newValue,
                     record.timestamp()
@@ -194,7 +195,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     tableName,
                     record.kafkaPartition(),
                     record.keySchema(),
-                    record.key(),
+                    normalizedKey,
                     null,
                     null,
                     record.timestamp()
@@ -210,6 +211,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (!(record.value() instanceof Struct)) {
             return record;
         }
+        KeyNormalizationResult normalizedKey = normalizationEnabled
+            ? normalizeStructuredKey(record.keySchema(), record.key())
+            : new KeyNormalizationResult(record.keySchema(), record.key());
 
         Struct envelope = (Struct) record.value();
         String op = envelope.getString("op");
@@ -237,8 +241,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 return record.newRecord(
                     tableName,
                     record.kafkaPartition(),
-                    record.keySchema(),
-                    record.key(),
+                    normalizedKey.schema,
+                    normalizedKey.value,
                     normalizedAfter.schema(),
                     normalizedAfter,
                     record.timestamp()
@@ -249,8 +253,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 return record.newRecord(
                     tableName,
                     record.kafkaPartition(),
-                    record.keySchema(),
-                    record.key(),
+                    normalizedKey.schema,
+                    normalizedKey.value,
                     null,
                     null,
                     record.timestamp()
@@ -471,6 +475,106 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         }
         Struct decimalStruct = (Struct) value;
         return decimalStruct.getInt32("scale");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object normalizeSchemalessKey(Object key) {
+        if (!(key instanceof Map)) {
+            return key;
+        }
+        Map<String, Object> keyMap = (Map<String, Object>) key;
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : keyMap.entrySet()) {
+            Object raw = entry.getValue();
+            if (raw instanceof Map) {
+                Map<String, Object> rawMap = (Map<String, Object>) raw;
+                if (rawMap.containsKey("scale") && rawMap.containsKey("value")) {
+                    normalized.put(entry.getKey(), schemalessVariableScaleToBigDecimal(rawMap));
+                    continue;
+                }
+            }
+            normalized.put(entry.getKey(), raw);
+        }
+        return normalized;
+    }
+
+    private Object schemalessVariableScaleToBigDecimal(Map<String, Object> valueMap) {
+        Object scaleObj = valueMap.get("scale");
+        Object rawObj = valueMap.get("value");
+        if (!(scaleObj instanceof Number)) {
+            return valueMap;
+        }
+        byte[] bytes = toBytes(rawObj);
+        if (bytes == null) {
+            return valueMap;
+        }
+        int scale = ((Number) scaleObj).intValue();
+        return new BigDecimal(new BigInteger(bytes), scale);
+    }
+
+    private KeyNormalizationResult normalizeStructuredKey(Schema keySchema, Object keyValue) {
+        if (keySchema == null || !(keyValue instanceof Struct)) {
+            return new KeyNormalizationResult(keySchema, keyValue);
+        }
+
+        Struct keyStruct = (Struct) keyValue;
+        SchemaBuilder builder = SchemaBuilder.struct();
+        if (keySchema.name() != null) {
+            builder.name(keySchema.name());
+        }
+        if (keySchema.version() != null) {
+            builder.version(keySchema.version());
+        }
+        if (keySchema.doc() != null) {
+            builder.doc(keySchema.doc());
+        }
+
+        Map<String, Object> normalizedValues = new LinkedHashMap<>();
+        for (Field field : keySchema.fields()) {
+            Object raw = keyStruct.get(field);
+            Schema normalizedFieldSchema = buildNormalizedKeyFieldSchema(field.schema(), raw);
+            builder.field(field.name(), normalizedFieldSchema);
+            normalizedValues.put(field.name(), normalizeStructuredKeyFieldValue(field.schema(), raw));
+        }
+
+        Schema normalizedSchema = builder.build();
+        Struct normalizedStruct = new Struct(normalizedSchema);
+        for (Field field : normalizedSchema.fields()) {
+            normalizedStruct.put(field, normalizedValues.get(field.name()));
+        }
+        return new KeyNormalizationResult(normalizedSchema, normalizedStruct);
+    }
+
+    private Schema buildNormalizedKeyFieldSchema(Schema fieldSchema, Object rawValue) {
+        if (fieldSchema != null && "io.debezium.data.VariableScaleDecimal".equals(fieldSchema.name())) {
+            Integer scale = extractVariableScale(rawValue);
+            SchemaBuilder decimalBuilder = Decimal.builder(scale == null ? 0 : scale);
+            if (fieldSchema.isOptional()) {
+                decimalBuilder.optional();
+            }
+            if (fieldSchema.doc() != null) {
+                decimalBuilder.doc(fieldSchema.doc());
+            }
+            return decimalBuilder.build();
+        }
+        return fieldSchema;
+    }
+
+    private Object normalizeStructuredKeyFieldValue(Schema fieldSchema, Object rawValue) {
+        if (fieldSchema != null && "io.debezium.data.VariableScaleDecimal".equals(fieldSchema.name())) {
+            return variableScaleDecimalToBigDecimal(rawValue);
+        }
+        return rawValue;
+    }
+
+    private static class KeyNormalizationResult {
+        final Schema schema;
+        final Object value;
+
+        private KeyNormalizationResult(Schema schema, Object value) {
+            this.schema = schema;
+            this.value = value;
+        }
     }
 
     private Object variableScaleDecimalToBigDecimal(Object value) {
