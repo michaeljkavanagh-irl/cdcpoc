@@ -5,6 +5,7 @@ import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
@@ -211,9 +212,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (!(record.value() instanceof Struct)) {
             return record;
         }
-        KeyNormalizationResult normalizedKey = normalizationEnabled
+        SchemaAndValue normalizedKey = normalizationEnabled
             ? normalizeStructuredKey(record.keySchema(), record.key())
-            : new KeyNormalizationResult(record.keySchema(), record.key());
+            : new SchemaAndValue(record.keySchema(), record.key());
 
         Struct envelope = (Struct) record.value();
         String op = envelope.getString("op");
@@ -241,8 +242,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 return record.newRecord(
                     tableName,
                     record.kafkaPartition(),
-                    normalizedKey.schema,
-                    normalizedKey.value,
+                    normalizedKey.schema(),
+                    normalizedKey.value(),
                     normalizedAfter.schema(),
                     normalizedAfter,
                     record.timestamp()
@@ -253,8 +254,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 return record.newRecord(
                     tableName,
                     record.kafkaPartition(),
-                    normalizedKey.schema,
-                    normalizedKey.value,
+                    normalizedKey.schema(),
+                    normalizedKey.value(),
                     null,
                     null,
                     record.timestamp()
@@ -512,9 +513,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         return new BigDecimal(new BigInteger(bytes), scale);
     }
 
-    private KeyNormalizationResult normalizeStructuredKey(Schema keySchema, Object keyValue) {
+    private SchemaAndValue normalizeStructuredKey(Schema keySchema, Object keyValue) {
         if (keySchema == null || !(keyValue instanceof Struct)) {
-            return new KeyNormalizationResult(keySchema, keyValue);
+            return new SchemaAndValue(keySchema, keyValue);
         }
 
         Struct keyStruct = (Struct) keyValue;
@@ -542,7 +543,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         for (Field field : normalizedSchema.fields()) {
             normalizedStruct.put(field, normalizedValues.get(field.name()));
         }
-        return new KeyNormalizationResult(normalizedSchema, normalizedStruct);
+        return new SchemaAndValue(normalizedSchema, normalizedStruct);
     }
 
     private Schema buildNormalizedKeyFieldSchema(Schema fieldSchema, Object rawValue) {
@@ -565,16 +566,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             return variableScaleDecimalToBigDecimal(rawValue);
         }
         return rawValue;
-    }
-
-    private static class KeyNormalizationResult {
-        final Schema schema;
-        final Object value;
-
-        private KeyNormalizationResult(Schema schema, Object value) {
-            this.schema = schema;
-            this.value = value;
-        }
     }
 
     private Object variableScaleDecimalToBigDecimal(Object value) {
