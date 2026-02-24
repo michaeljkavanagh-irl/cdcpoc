@@ -24,7 +24,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Custom SMT that:
@@ -38,6 +38,10 @@ import java.util.Optional;
  * the topic name, which works even for tombstones (null values).
  * Supports both schema-less (Map) and schema-enabled (Struct) records.
  * Includes optional type normalization using Debezium source column type hints.
+ * Performance note:
+ * - Normalization plans are cached per schema for both value and key.
+ * - If a schema needs no conversion, records are passed through without cloning.
+ * - Dynamic decimal scale cases still preserve correctness by using per-scale schema cache.
  *
  * Connector config controls:
  * - transforms.route.normalization.enabled=true|false
@@ -101,15 +105,17 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     private boolean normalizationEnabled = true;
     private String mappingMode = MODE_ORACLE;
     private Map<String, String> activeTypeMapping = ORACLE_TYPE_MAPPING;
+    // Value schema -> precomputed conversion plan used on the hot path.
+    private final Map<Schema, ValueNormalizationPlan> valuePlanCache = new ConcurrentHashMap<>();
+    // Key schema -> precomputed key normalization plan for update/delete matching.
+    private final Map<Schema, KeyNormalizationPlan> keyPlanCache = new ConcurrentHashMap<>();
 
     @Override
     public void configure(Map<String, ?> configs) {
         Object raw = configs.get(NORMALIZATION_ENABLED_CONFIG);
         if (raw == null) {
             normalizationEnabled = true;
-            return;
-        }
-        if (raw instanceof Boolean) {
+        } else if (raw instanceof Boolean) {
             normalizationEnabled = (Boolean) raw;
         } else {
             normalizationEnabled = Boolean.parseBoolean(String.valueOf(raw));
@@ -122,6 +128,9 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         }
         mappingMode = configuredMode;
         activeTypeMapping = MODE_ORACLE.equals(mappingMode) ? ORACLE_TYPE_MAPPING : POSTGRES_TYPE_MAPPING;
+        // Drop cached plans whenever config changes to avoid stale mapping behavior.
+        valuePlanCache.clear();
+        keyPlanCache.clear();
     }
 
     @Override
@@ -267,33 +276,102 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     private Struct normalizeStruct(Struct after) {
-        SchemaBuilder builder = SchemaBuilder.struct();
-        if (after.schema().name() != null) {
-            builder.name(after.schema().name());
-        }
-        if (after.schema().version() != null) {
-            builder.version(after.schema().version());
-        }
-        if (after.schema().doc() != null) {
-            builder.doc(after.schema().doc());
+        // Build conversion plan once per schema, then reuse for all records with same schema.
+        ValueNormalizationPlan plan = valuePlanCache.computeIfAbsent(after.schema(), this::buildValuePlan);
+        // Fast path: no field in this schema requires normalization.
+        if (!plan.requiresNormalization) {
+            return after;
         }
 
-        Map<String, Object> normalizedValuesByField = new LinkedHashMap<>();
-        for (Field field : after.schema().fields()) {
-            Object rawValue = after.get(field);
-            String mappedTargetType = mappedTargetType(field.schema());
-            Object normalizedValue = normalizeValue(rawValue, mappedTargetType, field.schema());
-            Schema normalizedFieldSchema = buildFieldSchema(field.schema(), mappedTargetType, rawValue);
-            builder.field(field.name(), normalizedFieldSchema);
-            normalizedValuesByField.put(field.name(), normalizedValue);
-        }
-
-        Schema normalizedSchema = builder.build();
+        Schema normalizedSchema = plan.fixedNormalizedSchema != null
+            ? plan.fixedNormalizedSchema
+            : buildDynamicValueSchema(after, plan);
         Struct normalized = new Struct(normalizedSchema);
-        for (Map.Entry<String, Object> entry : normalizedValuesByField.entrySet()) {
-            normalized.put(normalizedSchema.field(entry.getKey()), entry.getValue());
+
+        for (int i = 0; i < plan.fields.length; i++) {
+            Field field = plan.fields[i];
+            Object rawValue = after.get(field);
+            String targetType = plan.targetTypes[i];
+            Object normalizedValue = targetType == null
+                ? rawValue
+                : normalizeValue(rawValue, targetType, field.schema());
+            normalized.put(normalizedSchema.field(field.name()), normalizedValue);
         }
         return normalized;
+    }
+
+    private ValueNormalizationPlan buildValuePlan(Schema schema) {
+        // Precompute target type and normalized field schema decisions once per value schema.
+        Field[] fields = schema.fields().toArray(new Field[0]);
+        String[] targetTypes = new String[fields.length];
+        Schema[] fixedFieldSchemas = new Schema[fields.length];
+        boolean[] dynamicSchemaField = new boolean[fields.length];
+
+        boolean requiresNormalization = false;
+        boolean hasDynamicFieldSchema = false;
+        for (int i = 0; i < fields.length; i++) {
+            Field field = fields[i];
+            String targetType = mappedTargetType(field.schema());
+            targetTypes[i] = targetType;
+
+            if (targetType == null) {
+                fixedFieldSchemas[i] = field.schema();
+                continue;
+            }
+
+            requiresNormalization = true;
+            if (isDynamicDecimalScaleField(field.schema(), targetType)) {
+                dynamicSchemaField[i] = true;
+                hasDynamicFieldSchema = true;
+                fixedFieldSchemas[i] = field.schema();
+            } else {
+                fixedFieldSchemas[i] = buildFieldSchema(field.schema(), targetType, null);
+            }
+        }
+
+        Schema fixedNormalizedSchema = null;
+        if (requiresNormalization && !hasDynamicFieldSchema) {
+            fixedNormalizedSchema = buildStructSchema(schema, fields, fixedFieldSchemas);
+        }
+        return new ValueNormalizationPlan(fields, targetTypes, fixedFieldSchemas, dynamicSchemaField, requiresNormalization, fixedNormalizedSchema);
+    }
+
+    private Schema buildDynamicValueSchema(Struct after, ValueNormalizationPlan plan) {
+        // Only used for fields whose normalized schema depends on per-record content (e.g., variable scale).
+        Schema[] fieldSchemas = new Schema[plan.fields.length];
+        for (int i = 0; i < plan.fields.length; i++) {
+            if (plan.dynamicSchemaField[i]) {
+                Object raw = after.get(plan.fields[i]);
+                fieldSchemas[i] = buildFieldSchema(plan.fields[i].schema(), plan.targetTypes[i], raw);
+            } else {
+                fieldSchemas[i] = plan.fixedFieldSchemas[i];
+            }
+        }
+        return buildStructSchema(after.schema(), plan.fields, fieldSchemas);
+    }
+
+    private Schema buildStructSchema(Schema originalSchema, Field[] fields, Schema[] fieldSchemas) {
+        // Shared helper that preserves schema metadata while swapping field schemas.
+        SchemaBuilder builder = SchemaBuilder.struct();
+        if (originalSchema.name() != null) {
+            builder.name(originalSchema.name());
+        }
+        if (originalSchema.version() != null) {
+            builder.version(originalSchema.version());
+        }
+        if (originalSchema.doc() != null) {
+            builder.doc(originalSchema.doc());
+        }
+        for (int i = 0; i < fields.length; i++) {
+            builder.field(fields[i].name(), fieldSchemas[i]);
+        }
+        return builder.build();
+    }
+
+    private boolean isDynamicDecimalScaleField(Schema schema, String targetType) {
+        return schema != null
+            && "decimal".equals(targetType)
+            && "io.debezium.data.VariableScaleDecimal".equals(schema.name());
     }
 
     private Schema buildFieldSchema(Schema originalFieldSchema, String targetType, Object rawValue) {
@@ -414,15 +492,17 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     private Integer parseNumericParameter(Map<String, String> parameters, String keyHint) {
-        Optional<Map.Entry<String, String>> match = parameters.entrySet().stream()
-            .filter(e -> e.getKey() != null && e.getKey().toLowerCase(Locale.ROOT).contains(keyHint))
-            .findFirst();
-
-        if (match.isEmpty()) {
+        String raw = null;
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
+            String key = entry.getKey();
+            if (key != null && key.toLowerCase(Locale.ROOT).contains(keyHint)) {
+                raw = entry.getValue();
+                break;
+            }
+        }
+        if (raw == null) {
             return null;
         }
-
-        String raw = match.get().getValue();
         if (raw == null || raw.trim().isEmpty()) {
             return null;
         }
@@ -518,7 +598,59 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             return new SchemaAndValue(keySchema, keyValue);
         }
 
+        // Build key plan once per key schema and skip work if key does not contain variable-scale fields.
+        KeyNormalizationPlan plan = keyPlanCache.computeIfAbsent(keySchema, this::buildKeyPlan);
+        if (!plan.requiresNormalization) {
+            return new SchemaAndValue(keySchema, keyValue);
+        }
+
         Struct keyStruct = (Struct) keyValue;
+        // Cache normalized key schema by observed decimal-scale signature.
+        String scaleSignature = buildScaleSignature(keyStruct, plan.fields, plan.variableScaleField);
+        Schema normalizedSchema = plan.schemaByScaleSignature.computeIfAbsent(
+            scaleSignature,
+            ignored -> buildNormalizedKeySchema(keySchema, plan.fields, plan.variableScaleField, keyStruct)
+        );
+        Struct normalizedStruct = new Struct(normalizedSchema);
+        for (Field field : plan.fields) {
+            Object raw = keyStruct.get(field);
+            normalizedStruct.put(field.name(), normalizeStructuredKeyFieldValue(field.schema(), raw));
+        }
+        return new SchemaAndValue(normalizedSchema, normalizedStruct);
+    }
+
+    private KeyNormalizationPlan buildKeyPlan(Schema keySchema) {
+        // Detect if this key schema has fields that require structural key normalization.
+        Field[] fields = keySchema.fields().toArray(new Field[0]);
+        boolean[] variableScaleField = new boolean[fields.length];
+        boolean requiresNormalization = false;
+        for (int i = 0; i < fields.length; i++) {
+            Schema schema = fields[i].schema();
+            boolean isVariableScale = schema != null && "io.debezium.data.VariableScaleDecimal".equals(schema.name());
+            variableScaleField[i] = isVariableScale;
+            if (isVariableScale) {
+                requiresNormalization = true;
+            }
+        }
+        return new KeyNormalizationPlan(fields, variableScaleField, requiresNormalization);
+    }
+
+    private String buildScaleSignature(Struct struct, Field[] fields, boolean[] variableScaleField) {
+        // Compact cache key representing current per-field variable decimal scales.
+        StringBuilder signature = new StringBuilder(fields.length * 3);
+        for (int i = 0; i < fields.length; i++) {
+            if (!variableScaleField[i]) {
+                signature.append('|');
+                continue;
+            }
+            Integer scale = extractVariableScale(struct.get(fields[i]));
+            signature.append(scale == null ? "n" : scale).append('|');
+        }
+        return signature.toString();
+    }
+
+    private Schema buildNormalizedKeySchema(Schema keySchema, Field[] fields, boolean[] variableScaleField, Struct keyStruct) {
+        // Build a key schema variant that matches the normalized key value shape.
         SchemaBuilder builder = SchemaBuilder.struct();
         if (keySchema.name() != null) {
             builder.name(keySchema.name());
@@ -529,21 +661,14 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (keySchema.doc() != null) {
             builder.doc(keySchema.doc());
         }
-
-        Map<String, Object> normalizedValues = new LinkedHashMap<>();
-        for (Field field : keySchema.fields()) {
-            Object raw = keyStruct.get(field);
-            Schema normalizedFieldSchema = buildNormalizedKeyFieldSchema(field.schema(), raw);
+        for (int i = 0; i < fields.length; i++) {
+            Field field = fields[i];
+            Schema normalizedFieldSchema = variableScaleField[i]
+                ? buildNormalizedKeyFieldSchema(field.schema(), keyStruct.get(field))
+                : field.schema();
             builder.field(field.name(), normalizedFieldSchema);
-            normalizedValues.put(field.name(), normalizeStructuredKeyFieldValue(field.schema(), raw));
         }
-
-        Schema normalizedSchema = builder.build();
-        Struct normalizedStruct = new Struct(normalizedSchema);
-        for (Field field : normalizedSchema.fields()) {
-            normalizedStruct.put(field, normalizedValues.get(field.name()));
-        }
-        return new SchemaAndValue(normalizedSchema, normalizedStruct);
+        return builder.build();
     }
 
     private Schema buildNormalizedKeyFieldSchema(Schema fieldSchema, Object rawValue) {
@@ -730,6 +855,48 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
     @Override
     public void close() {
-        // No resources to close
+        // Clear local caches on task shutdown/rebalance.
+        valuePlanCache.clear();
+        keyPlanCache.clear();
+    }
+
+    private static final class ValueNormalizationPlan {
+        // Immutable plan for a value schema to avoid repeated per-record schema introspection.
+        private final Field[] fields;
+        private final String[] targetTypes;
+        private final Schema[] fixedFieldSchemas;
+        private final boolean[] dynamicSchemaField;
+        private final boolean requiresNormalization;
+        private final Schema fixedNormalizedSchema;
+
+        private ValueNormalizationPlan(
+            Field[] fields,
+            String[] targetTypes,
+            Schema[] fixedFieldSchemas,
+            boolean[] dynamicSchemaField,
+            boolean requiresNormalization,
+            Schema fixedNormalizedSchema
+        ) {
+            this.fields = fields;
+            this.targetTypes = targetTypes;
+            this.fixedFieldSchemas = fixedFieldSchemas;
+            this.dynamicSchemaField = dynamicSchemaField;
+            this.requiresNormalization = requiresNormalization;
+            this.fixedNormalizedSchema = fixedNormalizedSchema;
+        }
+    }
+
+    private static final class KeyNormalizationPlan {
+        // Immutable key-field plan plus per-scale derived schema cache.
+        private final Field[] fields;
+        private final boolean[] variableScaleField;
+        private final boolean requiresNormalization;
+        private final Map<String, Schema> schemaByScaleSignature = new ConcurrentHashMap<>();
+
+        private KeyNormalizationPlan(Field[] fields, boolean[] variableScaleField, boolean requiresNormalization) {
+            this.fields = fields;
+            this.variableScaleField = variableScaleField;
+            this.requiresNormalization = requiresNormalization;
+        }
     }
 }
