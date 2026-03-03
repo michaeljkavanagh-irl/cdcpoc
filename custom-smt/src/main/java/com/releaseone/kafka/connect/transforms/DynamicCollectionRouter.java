@@ -142,7 +142,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         
         // Handle schema-less JSON (Map)
         if (record.valueSchema() == null) {
-            return applySchemaless(record);
+            return applySchemaless(record); //REMOVE? Place on dead letter queue instead
         }
 
         return applyWithSchema(record);

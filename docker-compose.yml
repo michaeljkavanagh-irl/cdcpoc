@@ -34,6 +34,28 @@ services:
       timeout: 10s
       retries: 5
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.0
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "PLAINTEXT://kafka:29092"
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
   kafka-connect-1:
     build:
       context: .
@@ -45,6 +67,8 @@ services:
       kafka:
         condition: service_healthy
       postgres-source:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
     ports:
       - "8083:8083"

@@ -53,7 +53,7 @@ This avoids relying on Mongo `_id` for delete matching and supports both single 
 
 ## Connector Configuration Notes
 
-### Source (`/Users/michael.kavanagh/mongo/vanillaflow/connectors/postgres-source.json`)
+### Source (`/Users/michael.kavanagh/mongo/vanillaflow/connectors/postgres-source-schema-registry.json`)
 
 Important settings:
 
@@ -64,7 +64,7 @@ Important settings:
 }
 ```
 
-### Sink (`/Users/michael.kavanagh/mongo/vanillaflow/connectors/mongodb-sink-builtin-strategy.json`)
+### Sink (`/Users/michael.kavanagh/mongo/vanillaflow/connectors/mongodb-sink-schema-registry.json`)
 
 Recommended delete-related settings:
 
@@ -106,11 +106,11 @@ docker compose up -d --build
 ```bash
 curl -sS -X POST http://localhost:8083/connectors \
   -H "Content-Type: application/json" \
-  -d @connectors/postgres-source.json
+  -d @connectors/postgres-source-schema-registry.json
 
 curl -sS -X POST http://localhost:8083/connectors \
   -H "Content-Type: application/json" \
-  -d @connectors/mongodb-sink-builtin-strategy.json
+  -d @connectors/mongodb-sink-schema-registry.json
 ```
 
 ## Smoke Test
@@ -173,8 +173,8 @@ docker logs kafka-connect-1 --since 10m
 ```text
 vanillaflow/
   connectors/
-    postgres-source.json
-    mongodb-sink-builtin-strategy.json
+    postgres-source-schema-registry.json
+    mongodb-sink-schema-registry.json
   custom-smt/
     src/main/java/com/releaseone/kafka/connect/transforms/DynamicCollectionRouter.java
     src/main/java/com/releaseone/kafka/connect/strategies/DeleteByBusinessKeyStrategy.java
