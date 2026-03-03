@@ -1,0 +1,32 @@
+{
+  "name": "mongodb-sink-connector-sr",
+  "config": {
+    "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
+    "tasks.max": "1",
+    "topics.regex": "^(?!mongodb-sink-dlq$|__consumer_offsets|docker-connect-).*",
+    "connection.uri": "mongodb+srv://${env:MONGODB_USER}:${env:MONGODB_PASSWORD}@${env:MONGODB_CLUSTER}/?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true",
+    "database": "${env:MONGODB_DATABASE}",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "key.converter.key.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "transforms": "route",
+    "transforms.route.type": "com.releaseone.kafka.connect.transforms.DynamicCollectionRouter",
+    "namespace.mapper": "com.mongodb.kafka.connect.sink.namespace.mapping.DefaultNamespaceMapper",
+    "namespace.mapper.collection": "${topic}",
+    "document.id.strategy": "com.mongodb.kafka.connect.sink.processor.id.strategy.FullKeyStrategy",
+    "writemodel.strategy": "com.mongodb.kafka.connect.sink.writemodel.strategy.ReplaceOneBusinessKeyStrategy",
+    "delete.writemodel.strategy": "com.releaseone.kafka.connect.strategies.DeleteByBusinessKeyStrategy",
+    "delete.on.null.values": "true",
+    "max.num.retries": "3",
+    "retries.defer.timeout": "5000",
+    "errors.tolerance": "all",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true",
+    "errors.deadletterqueue.topic.name": "mongodb-sink-dlq",
+    "errors.deadletterqueue.topic.replication.factor": "1",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "postgres-source-connector-sr",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "host.docker.internal",
+    "database.port": "${env:POSTGRES_PORT}",
+    "database.user": "${env:POSTGRES_USER}",
+    "database.password": "${env:POSTGRES_PASSWORD}",
+    "database.dbname": "${env:POSTGRES_DB}",
+    "database.server.name": "dev.opusccc",
+    "table.include.list": "public.*",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "filtered",
+    "slot.name": "debezium_northwind_slot_v2_sr",
+    "topic.prefix": "northwind-source",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "key.converter.key.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "snapshot.mode": "initial",
+    "decimal.handling.mode": "precise",
+    "time.precision.mode": "connect",
+    "tombstones.on.delete": "true",
+    "transforms": "routeRows",
+    "transforms.routeRows.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.routeRows.regex": ".*",
+    "transforms.routeRows.replacement": "northwind.clean.topic"
+  }
+}
