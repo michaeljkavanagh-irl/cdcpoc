@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.nameOverride }}
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.nameOverride }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.nameOverride }}
+    spec:
+      containers:
+        - name: schema-registry
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              value: {{ .Values.env.SCHEMA_REGISTRY_HOST_NAME | quote }}
+            - name: SCHEMA_REGISTRY_LISTENERS
+              value: {{ .Values.env.SCHEMA_REGISTRY_LISTENERS | quote }}
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: {{ .Values.env.SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS | quote }}

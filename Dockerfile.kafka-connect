@@ -4,6 +4,18 @@ FROM confluentinc/cp-kafka-connect:7.8.0
 RUN confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.2.1 && \
     confluent-hub install --no-prompt mongodb/kafka-connect-mongodb:2.0.3
 
+# Add Debezium scripting SMT support (Filter) and Groovy JSR223 engine.
+RUN set -eux; \
+    DEBEZIUM_VERSION=2.2.1.Final; \
+    GROOVY_VERSION=3.0.21; \
+    DEBEZIUM_LIB_DIR=/usr/share/confluent-hub-components/debezium-debezium-connector-postgresql/lib; \
+    curl -fSL "https://repo1.maven.org/maven2/io/debezium/debezium-scripting/${DEBEZIUM_VERSION}/debezium-scripting-${DEBEZIUM_VERSION}.jar" \
+      -o "${DEBEZIUM_LIB_DIR}/debezium-scripting-${DEBEZIUM_VERSION}.jar"; \
+    curl -fSL "https://repo1.maven.org/maven2/org/codehaus/groovy/groovy/${GROOVY_VERSION}/groovy-${GROOVY_VERSION}.jar" \
+      -o "${DEBEZIUM_LIB_DIR}/groovy-${GROOVY_VERSION}.jar"; \
+    curl -fSL "https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-jsr223/${GROOVY_VERSION}/groovy-jsr223-${GROOVY_VERSION}.jar" \
+      -o "${DEBEZIUM_LIB_DIR}/groovy-jsr223-${GROOVY_VERSION}.jar"
+
 # Copy custom strategy JAR into MongoDB connector plugin lib directory (classloader-safe for sink plugin).
 COPY custom-smt/target/kafka-connect-dynamic-router-1.0.0-strategy.jar \
      /usr/share/confluent-hub-components/mongodb-kafka-connect-mongodb/lib/

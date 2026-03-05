@@ -1,0 +1,4 @@
+apiVersion: v2
+name: schema-registry
+version: 0.1.0
+appVersion: "7.8.0"

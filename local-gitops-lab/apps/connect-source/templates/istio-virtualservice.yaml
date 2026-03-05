@@ -1,0 +1,16 @@
+{{- if .Values.istioEnabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ .Values.nameOverride }}
+  namespace: {{ .Values.namespace }}
+spec:
+  hosts:
+    - {{ .Values.nameOverride }}
+  http:
+    - route:
+        - destination:
+            host: {{ .Values.nameOverride }}
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

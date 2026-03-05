@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.nameOverride }}
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.nameOverride }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.nameOverride }}
+    spec:
+      containers:
+        - name: connect
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - name: CONNECT_GROUP_ID
+              value: {{ .Values.env.CONNECT_GROUP_ID | quote }}
+            - name: CONNECT_CONFIG_STORAGE_TOPIC
+              value: {{ .Values.env.CONNECT_CONFIG_STORAGE_TOPIC | quote }}
+            - name: CONNECT_OFFSET_STORAGE_TOPIC
+              value: {{ .Values.env.CONNECT_OFFSET_STORAGE_TOPIC | quote }}
+            - name: CONNECT_STATUS_STORAGE_TOPIC
+              value: {{ .Values.env.CONNECT_STATUS_STORAGE_TOPIC | quote }}
+            - name: CONNECT_BOOTSTRAP_SERVERS
+              value: {{ .Values.env.CONNECT_BOOTSTRAP_SERVERS | quote }}
+            - name: CONNECT_REST_PORT
+              value: {{ .Values.env.CONNECT_REST_PORT | quote }}
+            - name: CONNECT_PLUGIN_PATH
+              value: {{ .Values.env.CONNECT_PLUGIN_PATH | quote }}
