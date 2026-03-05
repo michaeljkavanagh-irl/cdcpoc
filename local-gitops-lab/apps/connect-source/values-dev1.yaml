@@ -1,4 +1,0 @@
-replicaCount: 2
-image:
-  repository: your-registry/connect-worker
-  tag: dev1
