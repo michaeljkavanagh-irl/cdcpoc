@@ -24,7 +24,10 @@
     "decimal.handling.mode": "precise",
     "time.precision.mode": "connect",
     "tombstones.on.delete": "true",
-    "transforms": "routeRows",
+    "transforms": "filterProcessInd,routeRows",
+    "transforms.filterProcessInd.type": "io.debezium.transforms.Filter",
+    "transforms.filterProcessInd.language": "jsr223.groovy",
+    "transforms.filterProcessInd.condition": "value == null || value.op == 'd' || value.source == null || value.source.table != 'CMGE_UPLOAD_FILE' || (value.after != null && ((value.after.schema().field('PROCESS_IND') != null && value.after.get('PROCESS_IND') == 'N') || (value.after.schema().field('process_ind') != null && value.after.get('process_ind') == 'N')))",
     "transforms.routeRows.type": "org.apache.kafka.connect.transforms.RegexRouter",
     "transforms.routeRows.regex": ".*",
     "transforms.routeRows.replacement": "northwind.clean.topic"
