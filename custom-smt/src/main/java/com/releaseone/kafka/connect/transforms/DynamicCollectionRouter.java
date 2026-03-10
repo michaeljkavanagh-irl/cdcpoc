@@ -54,14 +54,18 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     private static final String MODE_POSTGRES = "postgres";
 
     // Oracle mode mappings (source type -> target type).
+    // Note: for Oracle numeric families, runtime precision/scale logic + primitive integer fallback
+    // enforce the effective behavior used by this SMT:
+    // - integer-like NUMBER with precision <= 18 -> long (INT64)
+    // - numeric with precision > 18 or scale > 0 -> decimal
     private static final Map<String, String> ORACLE_TYPE_MAPPING = new LinkedHashMap<>();
     static {
         ORACLE_TYPE_MAPPING.put("VARCHAR2", "string");   // Postgres: VARCHAR, TEXT
         ORACLE_TYPE_MAPPING.put("CHAR", "string");       // Postgres: CHAR, CHARACTER
         ORACLE_TYPE_MAPPING.put("NCHAR", "string");      // Postgres equivalent: CHAR, CHARACTER
         ORACLE_TYPE_MAPPING.put("NVARCHAR2", "string");  // Postgres: VARCHAR
-        ORACLE_TYPE_MAPPING.put("INTEGER", "int");       // Postgres: INTEGER, INT4
-        ORACLE_TYPE_MAPPING.put("NUMBER", "decimal");    // Precision/scale-aware override in code
+        ORACLE_TYPE_MAPPING.put("INTEGER", "int");       // Runtime numeric normalization may upcast to long (INT64)
+        ORACLE_TYPE_MAPPING.put("NUMBER", "decimal");    // Runtime override: <=18 integer-like -> long, otherwise decimal
         ORACLE_TYPE_MAPPING.put("FLOAT", "double");      // Postgres: DOUBLE PRECISION
         ORACLE_TYPE_MAPPING.put("BINARY_FLOAT", "double");  // Postgres: REAL
         ORACLE_TYPE_MAPPING.put("BINARY_DOUBLE", "double"); // Postgres: DOUBLE PRECISION
@@ -75,6 +79,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     // Postgres mode mappings (source type -> target type).
+    // Numeric mappings here are baseline defaults; schema-aware normalization may still adjust
+    // emitted primitive integer widths on the hot path.
     private static final Map<String, String> POSTGRES_TYPE_MAPPING = new LinkedHashMap<>();
     static {
         POSTGRES_TYPE_MAPPING.put("VARCHAR", "string");      // Oracle: VARCHAR2
