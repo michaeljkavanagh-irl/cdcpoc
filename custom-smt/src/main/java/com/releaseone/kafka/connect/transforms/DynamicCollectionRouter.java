@@ -449,6 +449,11 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             }
         }
         if (sourceType == null || sourceType.isEmpty()) {
+            // Connector may emit primitive integer schema types without source type hints.
+            // Force these to long for consistent numeric handling.
+            if (isPrimitiveIntegerSchema(schema)) {
+                return "long";
+            }
             return null;
         }
 
@@ -479,9 +484,6 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
 
         Integer precision = parseNumericParameter(parameters, "precision");
         if (precision != null) {
-            if (precision <= 9) {
-                return "int";
-            }
             if (precision <= 18) {
                 return "long";
             }
@@ -520,6 +522,21 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             type = type.substring(0, parenIndex).trim();
         }
         return type;
+    }
+
+    private boolean isPrimitiveIntegerSchema(Schema schema) {
+        if (schema == null || schema.type() == null) {
+            return false;
+        }
+        switch (schema.type()) {
+            case INT8:
+            case INT16:
+            case INT32:
+            case INT64:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private Object normalizeValue(Object value, String targetType, Schema sourceSchema) {
@@ -609,12 +626,12 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         String scaleSignature = buildScaleSignature(keyStruct, plan.fields, plan.variableScaleField);
         Schema normalizedSchema = plan.schemaByScaleSignature.computeIfAbsent(
             scaleSignature,
-            ignored -> buildNormalizedKeySchema(keySchema, plan.fields, plan.variableScaleField, keyStruct)
+            ignored -> buildNormalizedKeySchema(keySchema, plan.fields, plan.variableScaleField, plan.upcastLongField, keyStruct)
         );
         Struct normalizedStruct = new Struct(normalizedSchema);
         for (Field field : plan.fields) {
             Object raw = keyStruct.get(field);
-            normalizedStruct.put(field.name(), normalizeStructuredKeyFieldValue(field.schema(), raw));
+            normalizedStruct.put(field.name(), normalizeStructuredKeyFieldValue(field.schema(), raw, plan.upcastLongField[field.index()]));
         }
         return new SchemaAndValue(normalizedSchema, normalizedStruct);
     }
@@ -623,16 +640,22 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         // Detect if this key schema has fields that require structural key normalization.
         Field[] fields = keySchema.fields().toArray(new Field[0]);
         boolean[] variableScaleField = new boolean[fields.length];
+        boolean[] upcastLongField = new boolean[fields.length];
         boolean requiresNormalization = false;
         for (int i = 0; i < fields.length; i++) {
             Schema schema = fields[i].schema();
             boolean isVariableScale = schema != null && "io.debezium.data.VariableScaleDecimal".equals(schema.name());
             variableScaleField[i] = isVariableScale;
-            if (isVariableScale) {
+            boolean shouldUpcastLong = schema != null
+                && schema.type() != null
+                && (schema.type() == Schema.Type.INT8 || schema.type() == Schema.Type.INT16 || schema.type() == Schema.Type.INT32)
+                && "long".equals(mappedTargetType(schema));
+            upcastLongField[i] = shouldUpcastLong;
+            if (isVariableScale || shouldUpcastLong) {
                 requiresNormalization = true;
             }
         }
-        return new KeyNormalizationPlan(fields, variableScaleField, requiresNormalization);
+        return new KeyNormalizationPlan(fields, variableScaleField, upcastLongField, requiresNormalization);
     }
 
     private String buildScaleSignature(Struct struct, Field[] fields, boolean[] variableScaleField) {
@@ -649,7 +672,13 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         return signature.toString();
     }
 
-    private Schema buildNormalizedKeySchema(Schema keySchema, Field[] fields, boolean[] variableScaleField, Struct keyStruct) {
+    private Schema buildNormalizedKeySchema(
+        Schema keySchema,
+        Field[] fields,
+        boolean[] variableScaleField,
+        boolean[] upcastLongField,
+        Struct keyStruct
+    ) {
         // Build a key schema variant that matches the normalized key value shape.
         SchemaBuilder builder = SchemaBuilder.struct();
         if (keySchema.name() != null) {
@@ -663,16 +692,24 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         }
         for (int i = 0; i < fields.length; i++) {
             Field field = fields[i];
-            Schema normalizedFieldSchema = variableScaleField[i]
-                ? buildNormalizedKeyFieldSchema(field.schema(), keyStruct.get(field))
-                : field.schema();
+            Schema normalizedFieldSchema = buildNormalizedKeyFieldSchema(
+                field.schema(),
+                keyStruct.get(field),
+                variableScaleField[i],
+                upcastLongField[i]
+            );
             builder.field(field.name(), normalizedFieldSchema);
         }
         return builder.build();
     }
 
-    private Schema buildNormalizedKeyFieldSchema(Schema fieldSchema, Object rawValue) {
-        if (fieldSchema != null && "io.debezium.data.VariableScaleDecimal".equals(fieldSchema.name())) {
+    private Schema buildNormalizedKeyFieldSchema(
+        Schema fieldSchema,
+        Object rawValue,
+        boolean variableScaleField,
+        boolean upcastLongField
+    ) {
+        if (variableScaleField && fieldSchema != null && "io.debezium.data.VariableScaleDecimal".equals(fieldSchema.name())) {
             Integer scale = extractVariableScale(rawValue);
             SchemaBuilder decimalBuilder = Decimal.builder(scale == null ? 0 : scale);
             if (fieldSchema.isOptional()) {
@@ -683,12 +720,25 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             }
             return decimalBuilder.build();
         }
+        if (upcastLongField && fieldSchema != null) {
+            SchemaBuilder longBuilder = SchemaBuilder.int64();
+            if (fieldSchema.isOptional()) {
+                longBuilder.optional();
+            }
+            if (fieldSchema.doc() != null) {
+                longBuilder.doc(fieldSchema.doc());
+            }
+            return longBuilder.build();
+        }
         return fieldSchema;
     }
 
-    private Object normalizeStructuredKeyFieldValue(Schema fieldSchema, Object rawValue) {
+    private Object normalizeStructuredKeyFieldValue(Schema fieldSchema, Object rawValue, boolean upcastLongField) {
         if (fieldSchema != null && "io.debezium.data.VariableScaleDecimal".equals(fieldSchema.name())) {
             return variableScaleDecimalToBigDecimal(rawValue);
+        }
+        if (upcastLongField) {
+            return toLong(rawValue);
         }
         return rawValue;
     }
@@ -890,12 +940,19 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         // Immutable key-field plan plus per-scale derived schema cache.
         private final Field[] fields;
         private final boolean[] variableScaleField;
+        private final boolean[] upcastLongField;
         private final boolean requiresNormalization;
         private final Map<String, Schema> schemaByScaleSignature = new ConcurrentHashMap<>();
 
-        private KeyNormalizationPlan(Field[] fields, boolean[] variableScaleField, boolean requiresNormalization) {
+        private KeyNormalizationPlan(
+            Field[] fields,
+            boolean[] variableScaleField,
+            boolean[] upcastLongField,
+            boolean requiresNormalization
+        ) {
             this.fields = fields;
             this.variableScaleField = variableScaleField;
+            this.upcastLongField = upcastLongField;
             this.requiresNormalization = requiresNormalization;
         }
     }
