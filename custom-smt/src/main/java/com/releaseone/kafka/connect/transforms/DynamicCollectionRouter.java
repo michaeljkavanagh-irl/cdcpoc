@@ -54,8 +54,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     private static final String MODE_POSTGRES = "postgres";
 
     // Oracle mode mappings (source type -> target type).
-    // Note: for Oracle numeric families, runtime precision/scale logic + primitive integer fallback
-    // enforce the effective behavior used by this SMT:
+    // Note: for Oracle numeric families, runtime precision/scale logic enforces
+    // the effective behavior used by this SMT:
     // - integer-like NUMBER with precision <= 18 -> long (INT64)
     // - numeric with precision > 18 or scale > 0 -> decimal
     private static final Map<String, String> ORACLE_TYPE_MAPPING = new LinkedHashMap<>();
@@ -64,7 +64,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         ORACLE_TYPE_MAPPING.put("CHAR", "string");       // Postgres: CHAR, CHARACTER
         ORACLE_TYPE_MAPPING.put("NCHAR", "string");      // Postgres equivalent: CHAR, CHARACTER
         ORACLE_TYPE_MAPPING.put("NVARCHAR2", "string");  // Postgres: VARCHAR
-        ORACLE_TYPE_MAPPING.put("INTEGER", "int");       // Runtime numeric normalization may upcast to long (INT64)
+        ORACLE_TYPE_MAPPING.put("INTEGER", "int");
         ORACLE_TYPE_MAPPING.put("NUMBER", "decimal");    // Runtime override: <=18 integer-like -> long, otherwise decimal
         ORACLE_TYPE_MAPPING.put("FLOAT", "double");      // Postgres: DOUBLE PRECISION
         ORACLE_TYPE_MAPPING.put("BINARY_FLOAT", "double");  // Postgres: REAL
@@ -79,8 +79,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     // Postgres mode mappings (source type -> target type).
-    // Numeric mappings here are baseline defaults; schema-aware normalization may still adjust
-    // emitted primitive integer widths on the hot path.
+    // Numeric mappings here are baseline defaults.
     private static final Map<String, String> POSTGRES_TYPE_MAPPING = new LinkedHashMap<>();
     static {
         POSTGRES_TYPE_MAPPING.put("VARCHAR", "string");      // Oracle: VARCHAR2
@@ -455,8 +454,8 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             }
         }
         if (sourceType == null || sourceType.isEmpty()) {
-            // Connector may emit primitive integer schema types without source type hints.
-            // Force these to long for consistent numeric handling.
+            // If source metadata is missing, upcast primitive small integers to long.
+            // Restrict to non-logical INT8/INT16/INT32 so Timestamp (logical INT64) is untouched.
             if (isPrimitiveIntegerSchema(schema)) {
                 return "long";
             }
@@ -534,11 +533,14 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         if (schema == null || schema.type() == null) {
             return false;
         }
+        // Skip logical types like org.apache.kafka.connect.data.Timestamp (INT64).
+        if (schema.name() != null && !schema.name().isEmpty()) {
+            return false;
+        }
         switch (schema.type()) {
             case INT8:
             case INT16:
             case INT32:
-            case INT64:
                 return true;
             default:
                 return false;
@@ -652,10 +654,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
             Schema schema = fields[i].schema();
             boolean isVariableScale = schema != null && "io.debezium.data.VariableScaleDecimal".equals(schema.name());
             variableScaleField[i] = isVariableScale;
-            boolean shouldUpcastLong = schema != null
-                && schema.type() != null
-                && (schema.type() == Schema.Type.INT8 || schema.type() == Schema.Type.INT16 || schema.type() == Schema.Type.INT32)
-                && "long".equals(mappedTargetType(schema));
+            boolean shouldUpcastLong = isPrimitiveIntegerSchema(schema) && "long".equals(mappedTargetType(schema));
             upcastLongField[i] = shouldUpcastLong;
             if (isVariableScale || shouldUpcastLong) {
                 requiresNormalization = true;
