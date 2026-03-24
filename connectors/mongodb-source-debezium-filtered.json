@@ -1,0 +1,25 @@
+{
+  "name": "mongodb-source-debezium-filtered",
+  "config": {
+    "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+    "tasks.max": "1",
+    "mongodb.connection.string": "mongodb+srv://${env:MONGODB_USER}:${env:MONGODB_PASSWORD}@${env:MONGODB_CLUSTER}/?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true",
+    "topic.prefix": "mongo-cdc",
+    "capture.mode": "change_streams_update_full",
+    "snapshot.mode": "never",
+    "tombstones.on.delete": "false",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "key.converter.key.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
+    "transforms": "filter,route",
+    "transforms.filter.type": "io.debezium.transforms.Filter",
+    "transforms.filter.language": "jsr223.groovy",
+    "transforms.filter.condition": "value != null && value.source != null && ((value.source.schema().field('collection') != null && value.source.get('collection') == 'CNGE_NOTE') || (value.source.schema().field('table') != null && value.source.get('table') == 'CNGE_NOTE')) && value.get('after') != null && (value.get('after').toString().contains('\"ECN\":\"OPUSM\"') || value.get('after').toString().contains('ECN=OPUSM'))",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": ".*",
+    "transforms.route.replacement": "mongo.filtered.ready.topic"
+  }
+}
