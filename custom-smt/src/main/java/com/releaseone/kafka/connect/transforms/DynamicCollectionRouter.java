@@ -50,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Transformation<R> {
     private static final String NORMALIZATION_ENABLED_CONFIG = "normalization.enabled";
     private static final String TYPE_MAPPING_MODE_CONFIG = "type.mapping.mode";
+    private static final String OMIT_NULL_FIELDS_CONFIG = "omit.null.fields";
     private static final String MODE_ORACLE = "oracle";
     private static final String MODE_POSTGRES = "postgres";
 
@@ -108,6 +109,7 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     }
 
     private boolean normalizationEnabled = true;
+    private boolean omitNullFields = false;
     private String mappingMode = MODE_ORACLE;
     private Map<String, String> activeTypeMapping = ORACLE_TYPE_MAPPING;
     // Value schema -> precomputed conversion plan used on the hot path.
@@ -133,6 +135,15 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
         }
         mappingMode = configuredMode;
         activeTypeMapping = MODE_ORACLE.equals(mappingMode) ? ORACLE_TYPE_MAPPING : POSTGRES_TYPE_MAPPING;
+
+        Object rawOmitNull = configs.get(OMIT_NULL_FIELDS_CONFIG);
+        if (rawOmitNull == null) {
+            omitNullFields = false;
+        } else if (rawOmitNull instanceof Boolean) {
+            omitNullFields = (Boolean) rawOmitNull;
+        } else {
+            omitNullFields = Boolean.parseBoolean(String.valueOf(rawOmitNull));
+        }
         // Drop cached plans whenever config changes to avoid stale mapping behavior.
         valuePlanCache.clear();
         keyPlanCache.clear();
@@ -189,8 +200,18 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                     return record;
                 }
                 
-                // Create new value with just the after fields (no metadata)
-                newValue = new HashMap<>(after);
+                // Create new value with just the after fields (no metadata).
+                // Optionally omit null-valued fields.
+                if (omitNullFields) {
+                    newValue = new HashMap<>();
+                    for (Map.Entry<String, Object> entry : after.entrySet()) {
+                        if (entry.getValue() != null) {
+                            newValue.put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                } else {
+                    newValue = new HashMap<>(after);
+                }
                 
                 // Return record with table name as topic for collection routing
                 return record.newRecord(
@@ -251,7 +272,12 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 if (after == null) {
                     return record;
                 }
-                Struct normalizedAfter = normalizationEnabled ? normalizeStruct(after) : after;
+                Struct normalizedAfter;
+                if (normalizationEnabled || omitNullFields) {
+                    normalizedAfter = normalizeStruct(after);
+                } else {
+                    normalizedAfter = after;
+                }
                 // Keep the table-routed topic, preserve key and typed "after" schema/value.
                 return record.newRecord(
                     tableName,
@@ -283,9 +309,13 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
     private Struct normalizeStruct(Struct after) {
         // Build conversion plan once per schema, then reuse for all records with same schema.
         ValueNormalizationPlan plan = valuePlanCache.computeIfAbsent(after.schema(), this::buildValuePlan);
-        // Fast path: no field in this schema requires normalization.
-        if (!plan.requiresNormalization) {
+        // Fast path: no field in this schema requires normalization and null-omit is disabled.
+        if (!plan.requiresNormalization && !omitNullFields) {
             return after;
+        }
+
+        if (omitNullFields) {
+            return normalizeStructOmittingNulls(after, plan);
         }
 
         Schema normalizedSchema = plan.fixedNormalizedSchema != null
@@ -301,6 +331,55 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 ? rawValue
                 : normalizeValue(rawValue, targetType, field.schema());
             normalized.put(normalizedSchema.field(field.name()), normalizedValue);
+        }
+        return normalized;
+    }
+
+    private Struct normalizeStructOmittingNulls(Struct after, ValueNormalizationPlan plan) {
+        SchemaBuilder builder = SchemaBuilder.struct();
+        Schema originalSchema = after.schema();
+        if (originalSchema.name() != null) {
+            builder.name(originalSchema.name());
+        }
+        if (originalSchema.version() != null) {
+            builder.version(originalSchema.version());
+        }
+        if (originalSchema.doc() != null) {
+            builder.doc(originalSchema.doc());
+        }
+
+        Map<String, Object> valuesByFieldName = new LinkedHashMap<>();
+
+        for (int i = 0; i < plan.fields.length; i++) {
+            Field field = plan.fields[i];
+            Object rawValue = after.get(field);
+            String targetType = plan.targetTypes[i];
+            Object normalizedValue = targetType == null
+                ? rawValue
+                : normalizeValue(rawValue, targetType, field.schema());
+
+            // Omit null-valued fields from final payload.
+            if (normalizedValue == null) {
+                continue;
+            }
+
+            Schema fieldSchema;
+            if (targetType == null) {
+                fieldSchema = field.schema();
+            } else if (plan.dynamicSchemaField[i]) {
+                fieldSchema = buildFieldSchema(field.schema(), targetType, rawValue);
+            } else {
+                fieldSchema = plan.fixedFieldSchemas[i];
+            }
+
+            builder.field(field.name(), fieldSchema);
+            valuesByFieldName.put(field.name(), normalizedValue);
+        }
+
+        Schema normalizedSchema = builder.build();
+        Struct normalized = new Struct(normalizedSchema);
+        for (Map.Entry<String, Object> entry : valuesByFieldName.entrySet()) {
+            normalized.put(normalizedSchema.field(entry.getKey()), entry.getValue());
         }
         return normalized;
     }
@@ -905,6 +984,13 @@ public class DynamicCollectionRouter<R extends ConnectRecord<R>> implements Tran
                 ConfigDef.ValidString.in(MODE_POSTGRES, MODE_ORACLE),
                 ConfigDef.Importance.MEDIUM,
                 "Datatype mapping mode: 'postgres' or 'oracle'."
+            )
+            .define(
+                OMIT_NULL_FIELDS_CONFIG,
+                ConfigDef.Type.BOOLEAN,
+                false,
+                ConfigDef.Importance.MEDIUM,
+                "When true, omit fields with null values from the transformed document payload."
             );
     }
 

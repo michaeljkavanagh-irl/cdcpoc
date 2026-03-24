@@ -14,6 +14,7 @@
     "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicRecordNameStrategy",
     "transforms": "route",
     "transforms.route.type": "com.releaseone.kafka.connect.transforms.DynamicCollectionRouter",
+    "transforms.route.omit.null.fields": "true",
     "namespace.mapper": "com.mongodb.kafka.connect.sink.namespace.mapping.DefaultNamespaceMapper",
     "namespace.mapper.collection": "${topic}",
     "document.id.strategy": "com.mongodb.kafka.connect.sink.processor.id.strategy.FullKeyStrategy",
